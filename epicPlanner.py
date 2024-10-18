@@ -27,7 +27,7 @@ def save_config(config):
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Resolve ticket order based on dependencies.")
 parser.add_argument("epic_key", help="The key of the epic")
-parser.add_argument("--transitive", action="store_true", help="Include transitive dependencies")
+parser.add_argument("-t", "--transitive", action="store_true", help="Include transitive dependencies")
 args = parser.parse_args()
 
 # Prompt for JIRA credentials if not stored in the config file
@@ -57,25 +57,25 @@ jql = f"\"Epic Link\"={epic_key}"
 issues = jira_client.search_issues(jql)
 
 # Create a dependency graph
-G = nx.DiGraph()
+graph = nx.DiGraph()
 for issue in issues:
     issue_key = issue.key
-    G.add_node(issue_key)
+    graph.add_node(issue_key)
     for link in issue.fields.issuelinks:
         if hasattr(link, 'outwardIssue') and link.outwardIssue and link.outwardIssue.key != issue_key:
-            G.add_edge(issue_key, link.outwardIssue.key)
+            graph.add_edge(issue_key, link.outwardIssue.key)
 
 # Topological sort
-sorted_issues = list(nx.topological_sort(G))
+sorted_issues = list(nx.topological_sort(graph))
 
 # Get the transitive closure of the graph to include transitive dependencies
 if args.transitive:
-    G = nx.transitive_closure(G)
+    graph = nx.transitive_closure(graph)
 
 
 print("Ordered tickets with dependencies and summaries:")
 for issue_key in sorted_issues:
-    dependencies = [dep for dep in G.predecessors(issue_key)]
+    dependencies = [dep for dep in graph.predecessors(issue_key)]
     issue = jira_client.issue(issue_key)  # Get the issue object
     summary = issue.fields.summary
     print(f"{issue_key}: {summary} - {dependencies}")

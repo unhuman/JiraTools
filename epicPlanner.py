@@ -1,6 +1,7 @@
 # pip install jira
 # pip install networkx
 
+import argparse
 import jira
 import networkx as nx
 import os
@@ -23,6 +24,12 @@ def save_config(config):
     with open(config_file, "w") as f:
         json.dump(config, f, indent=4)
 
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description="Resolve ticket order based on dependencies.")
+parser.add_argument("epic_key", help="The key of the epic")
+parser.add_argument("--transitive", action="store_true", help="Include transitive dependencies")
+args = parser.parse_args()
+
 # Prompt for JIRA credentials if not stored in the config file
 config = load_config()
 if not "jira_server" in config or not "personal_access_token" in config:
@@ -42,7 +49,7 @@ if not "jira_server" in config or not "personal_access_token" in config:
 jira_client = jira.JIRA(config["jira_server"], token_auth=(config["personal_access_token"]))
 
 # Get Epic information
-epic_key = input("Enter the Epic key: ")
+epic_key = args.epic_key
 epic = jira_client.issue(epic_key)
 
 # Search for all issues linked to the epic
@@ -53,7 +60,6 @@ issues = jira_client.search_issues(jql)
 G = nx.DiGraph()
 for issue in issues:
     issue_key = issue.key
-    print(issue.key)
     G.add_node(issue_key)
     for link in issue.fields.issuelinks:
         if hasattr(link, 'outwardIssue') and link.outwardIssue and link.outwardIssue.key != issue_key:
@@ -61,6 +67,11 @@ for issue in issues:
 
 # Topological sort
 sorted_issues = list(nx.topological_sort(G))
+
+# Get the transitive closure of the graph to include transitive dependencies
+if args.transitive:
+    G = nx.transitive_closure(G)
+
 
 print("Ordered tickets with dependencies and summaries:")
 for issue_key in sorted_issues:

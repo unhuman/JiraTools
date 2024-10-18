@@ -69,14 +69,16 @@ for issue in issues:
 sorted_issues = list(nx.topological_sort(graph))
 
 # Get the transitive closure of the graph to include transitive dependencies
-if args.transitive:
-    graph = nx.transitive_closure(graph)
+transitive_graph = nx.transitive_closure(graph)
 
 
 print("Ordered tickets with dependencies and summaries:")
 for issue_key in sorted_issues:
-    dependencies = [dep for dep in graph.predecessors(issue_key)]
+    dependencies = sorted([dep for dep in graph.predecessors(issue_key)])
+    transitive_dependencies = ""
+    if args.transitive:
+       transitive_dependencies = sorted(set([dep for dep in transitive_graph.predecessors(issue_key)]) - set(dependencies))
     issue = jira_client.issue(issue_key)  # Get the issue object
     summary = issue.fields.summary
-    print(f"{issue_key}: {summary} - {dependencies}")
+    print(f"{issue_key}: {summary} - {dependencies} {transitive_dependencies}")
 

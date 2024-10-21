@@ -28,7 +28,8 @@ def save_config(config):
 
 def statusIsDone(check_status):
     """Returns true if the status is a done state."""
-    return check_status.lower() == "done"
+    doneStatuses = ["closed", "deployed", "done"]
+    return check_status.lower() in doneStatuses
 
 def createDependencyOutput(graph, listOfDependencies):
     """Creates a string representation of the dependencies."""

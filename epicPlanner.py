@@ -117,5 +117,5 @@ for round_num, round_issues in enumerate(rounds, 1):
         summary = issue.fields.summary
 
         outputDependencies = createDependencyOutput(graph, dependencies)
-        outputTransitiveDependencies = createDependencyOutput(graph, transitive_dependencies) if len(transitive_dependencies) > 0 else ''
+        outputTransitiveDependencies = f"transitive {createDependencyOutput(graph, transitive_dependencies)}" if len(transitive_dependencies) > 0 else ''
         print(f"{Fore.CYAN}{issue_key}{Style.RESET_ALL}: {summary} - {outputDependencies} {outputTransitiveDependencies}")

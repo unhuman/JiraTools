@@ -64,8 +64,9 @@ for issue in issues:
     issue_key = issue.key
     graph.add_node(issue_key)
     for link in issue.fields.issuelinks:
-        if hasattr(link, 'outwardIssue') and link.outwardIssue and link.outwardIssue.key != issue_key:
-            graph.add_edge(issue_key, link.outwardIssue.key)
+        if link.type.name.lower() == "blocks":
+            if hasattr(link, 'outwardIssue') and link.outwardIssue and link.outwardIssue.key != issue_key:
+                graph.add_edge(issue_key, link.outwardIssue.key)
 
 # Topological sort
 sorted_issues = list(nx.topological_sort(graph))

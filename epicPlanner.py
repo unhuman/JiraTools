@@ -71,12 +71,25 @@ sorted_issues = list(nx.topological_sort(graph))
 # Get the transitive closure of the graph to include transitive dependencies
 transitive_graph = nx.transitive_closure(graph)
 
-
-print("Ordered tickets with dependencies and summaries:")
+# Identify tickets that can be done in the same round
+rounds = []
+current_round = []
 for issue_key in sorted_issues:
-    dependencies = sorted([dep for dep in graph.predecessors(issue_key)])
-    transitive_dependencies = "" if not args.transitive else sorted(set([dep for dep in transitive_graph.predecessors(issue_key)]) - set(dependencies))
-    issue = jira_client.issue(issue_key)  # Get the issue object
-    summary = issue.fields.summary
-    print(f"{issue_key}: {summary} - {dependencies} {transitive_dependencies if len(transitive_dependencies) > 0 else ''}")
+    if not current_round or all(any(dep in round_issues for round_issues in rounds) for dep in graph.predecessors(issue_key)):
+        current_round.append(issue_key)
+    else:
+        rounds.append(current_round)
+        current_round = [issue_key]
+if current_round:
+    rounds.append(current_round)
 
+# Print ordered tickets with dependencies and summaries, grouped by round
+print("Ordered tickets with dependencies and summaries, grouped by round:")
+for round_num, round_issues in enumerate(rounds, 1):
+    print(f"Round {round_num}:")
+    for issue_key in round_issues:
+        dependencies = sorted([dep for dep in graph.predecessors(issue_key)])
+        transitive_dependencies = "" if not args.transitive else sorted(set([dep for dep in transitive_graph.predecessors(issue_key)]) - set(dependencies))
+        issue = jira_client.issue(issue_key)  # Get the issue object
+        summary = issue.fields.summary
+        print(f"{issue_key}: {summary} - {dependencies} {transitive_dependencies if len(transitive_dependencies) > 0 else ''}")

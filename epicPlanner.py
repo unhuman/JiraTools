@@ -1,3 +1,5 @@
+# This was created with Google Gemini, with prompting for various features and fixes.
+
 # pip install jira
 # pip install networkx
 

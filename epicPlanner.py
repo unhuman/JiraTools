@@ -1,9 +1,9 @@
 # This was created with Google Gemini, with prompting for various features and fixes.
 
-# pip install jira
-# pip install networkx
+# pip install colorama | jira | networkx
 
 import argparse
+from colorama import init,Fore,Back,Style
 import jira
 import networkx as nx
 import os
@@ -25,6 +25,24 @@ def save_config(config):
     """Saves the configuration to the file."""
     with open(config_file, "w") as f:
         json.dump(config, f, indent=4)
+
+def statusIsDone(check_status):
+    """Returns true if the status is a done state."""
+    return check_status.lower() == "done"
+
+def createDependencyOutput(graph, listOfDependencies):
+    """Creates a string representation of the dependencies."""
+    if len (listOfDependencies) == 0:
+        return "[]"
+    else:
+        data = "["
+        for dep in listOfDependencies:
+            if len(data) > 1:
+                data = data + ", "
+            data += Fore.GREEN if statusIsDone(graph.nodes[dep]['status']) else Fore.RED
+            data += dep + Style.RESET_ALL
+        data += "]"
+        return data
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Resolve ticket order based on dependencies.")
@@ -62,7 +80,7 @@ issues = jira_client.search_issues(jql)
 graph = nx.DiGraph()
 for issue in issues:
     issue_key = issue.key
-    graph.add_node(issue_key)
+    graph.add_node(issue_key, status=issue.fields.status.name)
     for link in issue.fields.issuelinks:
         if link.type.name.lower() == "blocks":
             if hasattr(link, 'outwardIssue') and link.outwardIssue and link.outwardIssue.key != issue_key:
@@ -87,12 +105,16 @@ if current_round:
     rounds.append(current_round)
 
 # Print ordered tickets with dependencies and summaries, grouped by round
-print("Ordered tickets with dependencies and summaries, grouped by round:")
+print(Style.BRIGHT + "Ordered tickets with dependencies and summaries, grouped by round." + Style.RESET_ALL)
+print(f"Dependencies that are in a completed state are {Fore.GREEN}green{Style.RESET_ALL}, while those that are not are {Fore.RED}red{Style.RESET_ALL}.")
 for round_num, round_issues in enumerate(rounds, 1):
-    print(f"Round {round_num}:")
+    print(Style.BRIGHT + f"Round {round_num}:" + Style.RESET_ALL)
     for issue_key in round_issues:
         dependencies = sorted([dep for dep in graph.predecessors(issue_key)])
         transitive_dependencies = "" if not args.transitive else sorted(set([dep for dep in transitive_graph.predecessors(issue_key)]) - set(dependencies))
         issue = jira_client.issue(issue_key)  # Get the issue object
         summary = issue.fields.summary
-        print(f"{issue_key}: {summary} - {dependencies} {transitive_dependencies if len(transitive_dependencies) > 0 else ''}")
+
+        outputDependencies = createDependencyOutput(graph, dependencies)
+        outputTransitiveDependencies = createDependencyOutput(graph, transitive_dependencies) if len(transitive_dependencies) > 0 else ''
+        print(f"{Fore.CYAN}{issue_key}{Style.RESET_ALL}: {summary} - {outputDependencies} {outputTransitiveDependencies}")

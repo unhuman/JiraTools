@@ -109,8 +109,8 @@ if current_round:
     rounds.append(current_round)
 
 # Print ordered tickets with dependencies and summaries, grouped by round
-print(Style.BRIGHT + "Ordered tickets with dependencies and summaries, grouped by round." + Style.RESET_ALL)
-print(f"Work that is ready is {Style.BRIGHT}{Fore.CYAN}bright cyan{Style.RESET_ALL} and work that isn't ready is {Fore.CYAN}dim cyan{Style.RESET_ALL}.")
+print(f"{Style.BRIGHT}Ordered tickets with dependencies and summaries, grouped by round.{Style.RESET_ALL}")
+print(f"Work that is done is {Style.BRIGHT}{Fore.GREEN}bright green{Style.RESET_ALL}, work that is ready is {Style.BRIGHT}{Fore.CYAN}bright cyan{Style.RESET_ALL}, and work that isn't ready is {Fore.CYAN}dim cyan{Style.RESET_ALL}.")
 print(f"Dependencies that are in a completed state are {Fore.GREEN}green{Style.RESET_ALL}, while those that are not are {Fore.RED}red{Style.RESET_ALL}.")
 
 for round_num, round_issues in enumerate(rounds, 1):
@@ -123,5 +123,7 @@ for round_num, round_issues in enumerate(rounds, 1):
 
         outputDependencies = createDependencyOutput(graph, dependencies)
         outputTransitiveDependencies = f"transitive {createDependencyOutput(graph, transitive_dependencies)}" if len(transitive_dependencies) > 0 else ''
-        styleReady = Style.BRIGHT if checkDependenciesResolved(outputDependencies) else ''
-        print(f"{Fore.CYAN}{styleReady}{issue_key}{Style.RESET_ALL}: {summary} - {outputDependencies} {outputTransitiveDependencies}")
+        
+        colorIssue = Fore.GREEN if statusIsDone(issue.fields.status.name) else Fore.CYAN
+        styleIssue = Style.BRIGHT if checkDependenciesResolved(outputDependencies) else ''
+        print(f"{colorIssue}{styleIssue}{issue_key}{Style.RESET_ALL}: {summary} - {outputDependencies} {outputTransitiveDependencies}")

@@ -45,6 +45,9 @@ def createDependencyOutput(graph, listOfDependencies):
         data += "]"
         return data
 
+def checkDependenciesResolved(strDependencies):
+    return (strDependencies.find(Fore.RED) == -1)
+
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Resolve ticket order based on dependencies.")
 parser.add_argument("epic_key", help="The key of the epic")
@@ -107,7 +110,9 @@ if current_round:
 
 # Print ordered tickets with dependencies and summaries, grouped by round
 print(Style.BRIGHT + "Ordered tickets with dependencies and summaries, grouped by round." + Style.RESET_ALL)
+print(f"Work that is ready is {Style.BRIGHT}{Fore.CYAN}bright cyan{Style.RESET_ALL} and work that isn't ready is {Fore.CYAN}dim cyan{Style.RESET_ALL}.")
 print(f"Dependencies that are in a completed state are {Fore.GREEN}green{Style.RESET_ALL}, while those that are not are {Fore.RED}red{Style.RESET_ALL}.")
+
 for round_num, round_issues in enumerate(rounds, 1):
     print(Style.BRIGHT + f"Round {round_num}:" + Style.RESET_ALL)
     for issue_key in round_issues:
@@ -118,4 +123,5 @@ for round_num, round_issues in enumerate(rounds, 1):
 
         outputDependencies = createDependencyOutput(graph, dependencies)
         outputTransitiveDependencies = f"transitive {createDependencyOutput(graph, transitive_dependencies)}" if len(transitive_dependencies) > 0 else ''
-        print(f"{Fore.CYAN}{issue_key}{Style.RESET_ALL}: {summary} - {outputDependencies} {outputTransitiveDependencies}")
+        styleReady = Style.BRIGHT if checkDependenciesResolved(outputDependencies) else ''
+        print(f"{Fore.CYAN}{styleReady}{issue_key}{Style.RESET_ALL}: {summary} - {outputDependencies} {outputTransitiveDependencies}")

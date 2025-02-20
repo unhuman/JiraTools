@@ -70,9 +70,9 @@ for issue in issues:
         sprint_field = getattr(issue.fields, 'customfield_10505', None)  # Using customfield_10505
 
         if sprint_field:
-            if isinstance(sprint_field, list):  # Multi-select sprint field (list of objects)
-                for sprint_data in sprint_field:  # Iterate through the list of sprint objects
-                    if isinstance(sprint_data, str):  # Check if sprint_data is a string (older format)
+            if isinstance(sprint_field, list):  # Multi-select sprint field (list of objects/strings)
+                for sprint_data in sprint_field:
+                    if isinstance(sprint_data, str):  # Older format
                         try:
                             sprint_id_str = sprint_data.split("[id=")[1].split(",")[0]
                             sprint_id = int(sprint_id_str)
@@ -80,14 +80,13 @@ for issue in issues:
                         except (IndexError, ValueError):
                             print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_data}")
                             unplanned_issues.append(issue)
-                            continue  # Skip to the next sprint_data
-                    elif hasattr(sprint_data, 'id'):  # Check if sprint_data has an ID (newer format)
+                            continue
+                    elif hasattr(sprint_data, 'id'):  # Newer format
                         sprint_ids.append(sprint_data.id)
                     else:
                         print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_data}")
                         unplanned_issues.append(issue)
-                        continue  # Skip to the next sprint_data
-
+                        continue
             elif isinstance(sprint_field, str):  # Single sprint field (string representation)
                 try:
                     sprint_id_str = sprint_field.split("[id=")[1].split(",")[0]
@@ -108,30 +107,30 @@ for issue in issues:
             unplanned_issues.append(issue)
             continue  # Skip to the next issue
 
-        for sprint_id in sprint_ids:
+        # Report only the LAST sprint
+        sprint_id = sprint_ids[-1]  # Get the last sprint ID
+        if sprint_id not in planned_issues:
+            planned_issues[sprint_id] = {}
+
+        status = issue.fields.status.name
+
+        if statusIsDone(status):
+            if sprint_id not in completed_issues:
+                completed_issues[sprint_id] = {}
+            if status not in completed_issues[sprint_id]:
+                completed_issues[sprint_id][status] = []
+            completed_issues[sprint_id][status].append(issue)
+        else:
             if sprint_id not in planned_issues:
                 planned_issues[sprint_id] = {}
-
-            status = issue.fields.status.name
-
-            if statusIsDone(status):
-                if sprint_id not in completed_issues:
-                    completed_issues[sprint_id] = {}
-                if status not in completed_issues[sprint_id]:
-                    completed_issues[sprint_id][status] = []
-                completed_issues[sprint_id][status].append(issue)
-            else:
-                if sprint_id not in planned_issues:
-                    planned_issues[sprint_id] = {}
-                if status not in planned_issues[sprint_id]:
-                    planned_issues[sprint_id][status] = []
-                planned_issues[sprint_id][status].append(issue)
+            if status not in planned_issues[sprint_id]:
+                planned_issues[sprint_id][status] = []
+            planned_issues[sprint_id][status].append(issue)
 
     except AttributeError:
         unplanned_issues.append(issue)
         print(f"Warning: Issue {issue.key} has no sprint assigned.")
         continue
-
 
 # Fetch Sprint Names and Dates (Corrected Logic Here - Handling None Dates)
 sprint_data = {}
@@ -147,7 +146,7 @@ for sprint_id in all_sprint_ids:  # Iterate through all sprint IDs
         sprint_data[sprint_id] = {"name": f"Sprint ID {sprint_id} (Data Unavailable)", "startDate": None, "endDate": None}
 
 
-# Print the report (Corrected Sorting Logic - Handling None Dates in Sort)
+# Print the report (Corrected Printing Logic - Including Dates)
 print(f"{Style.BRIGHT}Epic Plan Evaluation: {epic_key}{Style.RESET_ALL}")
 
 def sprint_sort_key(item):  # Custom sort function (Handles None Dates)
@@ -162,24 +161,36 @@ def sprint_sort_key(item):  # Custom sort function (Handles None Dates)
     else:
         return datetime.max  # Put sprints without dates at the end
 
-# Print Completed Work (Sorted)
+# Print Completed Work (Sorted, with Dates)
 print(f"\n{Style.BRIGHT}Completed Work:{Style.RESET_ALL}")
 for sprint_id, status_groups in sorted(completed_issues.items(), key=sprint_sort_key):
     sprint_info = sprint_data.get(sprint_id)
     sprint_name = sprint_info.get("name")
-    print(f"\n{Style.BRIGHT}Sprint: {sprint_name}{Style.RESET_ALL}")
+    start_date_str = sprint_info.get("startDate")
+    end_date_str = sprint_info.get("endDate")
+
+    start_date = datetime.fromisoformat(start_date_str[:-1]).strftime("%Y-%m-%d") if start_date_str else "n/a"
+    end_date = datetime.fromisoformat(end_date_str[:-1]).strftime("%Y-%m-%d") if end_date_str else "n/a"
+
+    print(f"\n{Style.BRIGHT}Sprint: {sprint_name} ({start_date} - {end_date}){Style.RESET_ALL}")  # Include dates
     for status, issue_list in sorted(status_groups.items()):
         print(f"  {status}:")
         for issue in issue_list:
             color = Fore.GREEN if statusIsDone(status) else Fore.YELLOW if status.lower() == "in progress" else Fore.CYAN
             print(f"    {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
 
-# Print Planned Work (Sorted)
+# Print Planned Work (Sorted, with Dates)
 print(f"\n{Style.BRIGHT}Planned Work:{Style.RESET_ALL}")
 for sprint_id, status_groups in sorted(planned_issues.items(), key=sprint_sort_key):
     sprint_info = sprint_data.get(sprint_id)
     sprint_name = sprint_info.get("name")
-    print(f"\n{Style.BRIGHT}Sprint: {sprint_name}{Style.RESET_ALL}")
+    start_date_str = sprint_info.get("startDate")
+    end_date_str = sprint_info.get("endDate")
+
+    start_date = datetime.fromisoformat(start_date_str[:-1]).strftime("%Y-%m-%d") if start_date_str else "n/a"
+    end_date = datetime.fromisoformat(end_date_str[:-1]).strftime("%Y-%m-%d") if end_date_str else "n/a"
+
+    print(f"\n{Style.BRIGHT}Sprint: {sprint_name} ({start_date} - {end_date}){Style.RESET_ALL}")  # Include dates
     for status, issue_list in sorted(status_groups.items()):
         print(f"  {status}:")
         for issue in issue_list:

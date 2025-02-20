@@ -1,0 +1,194 @@
+import argparse
+from colorama import init, Fore, Back, Style
+import jira
+import os
+import json
+from datetime import datetime
+
+# Configuration
+config_file = os.path.expanduser("~/.epicPlanner")
+
+def load_config():
+    try:
+        with open(config_file, "r") as f:
+            config = json.load(f)
+            return config
+    except FileNotFoundError:
+        return {}
+
+def save_config(config):
+    with open(config_file, "w") as f:
+        json.dump(config, f, indent=4)
+
+def statusIsDone(check_status):
+    doneStatuses = ["closed", "deployed", "done", "resolved"]
+    return check_status.lower() in doneStatuses
+
+# Parse arguments
+parser = argparse.ArgumentParser(description="Evaluate the current plan of an epic.")
+parser.add_argument("epic_key", help="The key of the epic")
+args = parser.parse_args()
+
+# JIRA setup
+config = load_config()
+if "jira_server" not in config or "personal_access_token" not in config:
+    jira_server = input("Enter your JIRA server URL: ")
+    if not jira_server.startswith("https://"):
+        jira_server = "https://" + jira_server
+
+    personal_access_token = input("Enter your JIRA personal access token: ")
+
+    config["jira_server"] = jira_server
+    config["personal_access_token"] = personal_access_token
+    save_config(config)
+
+jira_client = jira.JIRA(config["jira_server"], token_auth=(config["personal_access_token"]))
+
+# Get Epic and Issues
+epic_key = args.epic_key
+try:
+    epic = jira_client.issue(epic_key)
+except jira.exceptions.JIRAError as e:
+    print(f"Error retrieving epic: {e}")
+    exit(1)
+
+jql = f"\"Epic Link\"={epic_key}"
+try:
+    issues = jira_client.search_issues(jql, maxResults=False)
+except jira.exceptions.JIRAError as e:
+    print(f"Error searching issues: {e}")
+    exit(1)
+
+# Organize issues by sprint ID and status
+planned_issues = {}
+unplanned_issues = []
+completed_issues = {}
+
+for issue in issues:
+    sprint_ids = []
+    try:
+        sprint_field = getattr(issue.fields, 'customfield_10505', None)  # Using customfield_10505
+
+        if sprint_field:
+            if isinstance(sprint_field, list):  # Multi-select sprint field (list of objects)
+                for sprint_data in sprint_field:  # Iterate through the list of sprint objects
+                    if isinstance(sprint_data, str):  # Check if sprint_data is a string (older format)
+                        try:
+                            sprint_id_str = sprint_data.split("[id=")[1].split(",")[0]
+                            sprint_id = int(sprint_id_str)
+                            sprint_ids.append(sprint_id)
+                        except (IndexError, ValueError):
+                            print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_data}")
+                            unplanned_issues.append(issue)
+                            continue  # Skip to the next sprint_data
+                    elif hasattr(sprint_data, 'id'):  # Check if sprint_data has an ID (newer format)
+                        sprint_ids.append(sprint_data.id)
+                    else:
+                        print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_data}")
+                        unplanned_issues.append(issue)
+                        continue  # Skip to the next sprint_data
+
+            elif isinstance(sprint_field, str):  # Single sprint field (string representation)
+                try:
+                    sprint_id_str = sprint_field.split("[id=")[1].split(",")[0]
+                    sprint_id = int(sprint_id_str)
+                    sprint_ids.append(sprint_id)
+                except (IndexError, ValueError):
+                    print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_field}")
+                    unplanned_issues.append(issue)
+                    continue
+            elif hasattr(sprint_field, 'id'):  # Single sprint field (object with ID)
+                sprint_ids.append(sprint_field.id)
+            else:
+                print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_field}")
+                unplanned_issues.append(issue)
+                continue
+
+        if not sprint_ids:  # Unplanned
+            unplanned_issues.append(issue)
+            continue  # Skip to the next issue
+
+        for sprint_id in sprint_ids:
+            if sprint_id not in planned_issues:
+                planned_issues[sprint_id] = {}
+
+            status = issue.fields.status.name
+
+            if statusIsDone(status):
+                if sprint_id not in completed_issues:
+                    completed_issues[sprint_id] = {}
+                if status not in completed_issues[sprint_id]:
+                    completed_issues[sprint_id][status] = []
+                completed_issues[sprint_id][status].append(issue)
+            else:
+                if sprint_id not in planned_issues:
+                    planned_issues[sprint_id] = {}
+                if status not in planned_issues[sprint_id]:
+                    planned_issues[sprint_id][status] = []
+                planned_issues[sprint_id][status].append(issue)
+
+    except AttributeError:
+        unplanned_issues.append(issue)
+        print(f"Warning: Issue {issue.key} has no sprint assigned.")
+        continue
+
+
+# Fetch Sprint Names and Dates (Corrected Logic Here - Handling None Dates)
+sprint_data = {}
+all_sprint_ids = set(planned_issues.keys()).union(completed_issues.keys())  # Get all sprints
+for sprint_id in all_sprint_ids:  # Iterate through all sprint IDs
+    try:
+        sprint = jira_client.sprint(sprint_id)  # Get sprint object
+        start_date = getattr(sprint, 'startDate', None)  # Handle missing startDate attribute
+        end_date = getattr(sprint, 'endDate', None)      # Handle missing endDate attribute
+        sprint_data[sprint_id] = {"name": sprint.name, "startDate": start_date, "endDate": end_date}
+    except jira.exceptions.JIRAError as e:
+        print(f"Error getting sprint data for ID {sprint_id}: {e}")
+        sprint_data[sprint_id] = {"name": f"Sprint ID {sprint_id} (Data Unavailable)", "startDate": None, "endDate": None}
+
+
+# Print the report (Corrected Sorting Logic - Handling None Dates in Sort)
+print(f"{Style.BRIGHT}Epic Plan Evaluation: {epic_key}{Style.RESET_ALL}")
+
+def sprint_sort_key(item):  # Custom sort function (Handles None Dates)
+    sprint_id = item[0]
+    sprint_info = sprint_data.get(sprint_id, {})
+    start_date = sprint_info.get("startDate")
+    if start_date:
+        try:
+            return datetime.fromisoformat(start_date[:-1]) if isinstance(start_date, str) else datetime.min  # Remove trailing Z and convert, handle potential date format issues
+        except ValueError:  # Handle potential date format issues
+            return datetime.min  # Put invalid dates at the beginning
+    else:
+        return datetime.max  # Put sprints without dates at the end
+
+# Print Completed Work (Sorted)
+print(f"\n{Style.BRIGHT}Completed Work:{Style.RESET_ALL}")
+for sprint_id, status_groups in sorted(completed_issues.items(), key=sprint_sort_key):
+    sprint_info = sprint_data.get(sprint_id)
+    sprint_name = sprint_info.get("name")
+    print(f"\n{Style.BRIGHT}Sprint: {sprint_name}{Style.RESET_ALL}")
+    for status, issue_list in sorted(status_groups.items()):
+        print(f"  {status}:")
+        for issue in issue_list:
+            color = Fore.GREEN if statusIsDone(status) else Fore.YELLOW if status.lower() == "in progress" else Fore.CYAN
+            print(f"    {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
+
+# Print Planned Work (Sorted)
+print(f"\n{Style.BRIGHT}Planned Work:{Style.RESET_ALL}")
+for sprint_id, status_groups in sorted(planned_issues.items(), key=sprint_sort_key):
+    sprint_info = sprint_data.get(sprint_id)
+    sprint_name = sprint_info.get("name")
+    print(f"\n{Style.BRIGHT}Sprint: {sprint_name}{Style.RESET_ALL}")
+    for status, issue_list in sorted(status_groups.items()):
+        print(f"  {status}:")
+        for issue in issue_list:
+            color = Fore.GREEN if statusIsDone(status) else Fore.YELLOW if status.lower() == "in progress" else Fore.CYAN
+            print(f"    {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
+
+# Print Unplanned Work
+if unplanned_issues:
+    print(f"\n{Style.BRIGHT}Unplanned Work:{Style.RESET_ALL}")
+    for issue in unplanned_issues:
+        color = Fore.YELLOW
+        print(f"  {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")

@@ -5,31 +5,8 @@
 import argparse
 from colorama import init,Fore,Back,Style
 import jira
+from jiraToolsConfig import load_config, statusIsDone
 import networkx as nx
-import os
-import json
-
-# Define the configuration file path
-config_file = os.path.expanduser("~/.epicPlanner")
-
-def load_config():
-    """Loads the configuration from the file."""
-    try:
-        with open(config_file, "r") as f:
-            config = json.load(f)
-            return config
-    except FileNotFoundError:
-        return {}
-
-def save_config(config):
-    """Saves the configuration to the file."""
-    with open(config_file, "w") as f:
-        json.dump(config, f, indent=4)
-
-def statusIsDone(check_status):
-    """Returns true if the status is a done state."""
-    doneStatuses = ["closed", "deployed", "done"]
-    return check_status.lower() in doneStatuses
 
 def createDependencyOutput(graph, listOfDependencies):
     """Creates a string representation of the dependencies."""
@@ -56,18 +33,6 @@ args = parser.parse_args()
 
 # Prompt for JIRA credentials if not stored in the config file
 config = load_config()
-if not "jira_server" in config or not "personal_access_token" in config:
-    jira_server = input("Enter your JIRA server URL: ")
-    # Ensure the JIRA server URL starts with "https://"
-    if not jira_server.startswith("https://"):
-        jira_server = "https://" + jira_server
-
-    personal_access_token = input("Enter your JIRA personal access token: ")
-
-    # Store the credentials in the configuration file
-    config["jira_server"] = jira_server
-    config["personal_access_token"] = personal_access_token
-    save_config(config)
 
 # Create the JIRA client using the stored credentials
 jira_client = jira.JIRA(config["jira_server"], token_auth=(config["personal_access_token"]))

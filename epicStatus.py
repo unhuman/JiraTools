@@ -1,28 +1,8 @@
 import argparse
 from colorama import init, Fore, Back, Style
-import jira
-import os
-import json
 from datetime import datetime
-
-# Configuration
-config_file = os.path.expanduser("~/.epicPlanner")
-
-def load_config():
-    try:
-        with open(config_file, "r") as f:
-            config = json.load(f)
-            return config
-    except FileNotFoundError:
-        return {}
-
-def save_config(config):
-    with open(config_file, "w") as f:
-        json.dump(config, f, indent=4)
-
-def statusIsDone(check_status):
-    doneStatuses = ["closed", "deployed", "done", "resolved"]
-    return check_status.lower() in doneStatuses
+import jira
+from jiraToolsConfig import load_config, statusIsDone
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="Evaluate the current plan of an epic.")
@@ -31,16 +11,6 @@ args = parser.parse_args()
 
 # JIRA setup
 config = load_config()
-if "jira_server" not in config or "personal_access_token" not in config:
-    jira_server = input("Enter your JIRA server URL: ")
-    if not jira_server.startswith("https://"):
-        jira_server = "https://" + jira_server
-
-    personal_access_token = input("Enter your JIRA personal access token: ")
-
-    config["jira_server"] = jira_server
-    config["personal_access_token"] = personal_access_token
-    save_config(config)
 
 jira_client = jira.JIRA(config["jira_server"], token_auth=(config["personal_access_token"]))
 

@@ -135,8 +135,8 @@ def sprint_sort_key(item):  # Custom sort function (Handles None Dates)
 # Print Planned Work (Sorted, with Dates, Excluding Empty Sprints)
 def filter_and_print_sprints(title, issues_dict, sprint_data):
     print(f"\n{Style.BRIGHT}{title}:{Style.RESET_ALL}")
-    planned_sprints_to_report = {sprint_id: status_groups for sprint_id, status_groups in planned_issues.items() if status_groups} # Only report sprints with issues
-    for sprint_id, status_groups in sorted(issues_dict.items(), key=sprint_sort_key):
+    sprints_to_report = {sprint_id: status_groups for sprint_id, status_groups in issues_dict.items() if status_groups} # Only report sprints with issues
+    for sprint_id, status_groups in sorted(sprints_to_report.items(), key=sprint_sort_key):
         sprint_info = sprint_data.get(sprint_id)
         sprint_name = sprint_info.get("name")
         start_date_str = sprint_info.get("startDate")

@@ -116,9 +116,6 @@ for sprint_id in all_sprint_ids:  # Iterate through all sprint IDs
         sprint_data[sprint_id] = {"name": f"Sprint ID {sprint_id} (Data Unavailable)", "startDate": None, "endDate": None}
 
 
-# Print the report (Corrected Printing Logic - Including Dates)
-print(f"{Style.BRIGHT}Epic Plan Evaluation: {epic_key}{Style.RESET_ALL}")
-
 def sprint_sort_key(item):  # Custom sort function (Handles None Dates)
     sprint_id = item[0]
     sprint_info = sprint_data.get(sprint_id, {})
@@ -131,43 +128,35 @@ def sprint_sort_key(item):  # Custom sort function (Handles None Dates)
     else:
         return datetime.max  # Put sprints without dates at the end
 
+# Print Planned Work (Sorted, with Dates, Excluding Empty Sprints)
+def filter_and_print_sprints(title, issues_dict, sprint_data):
+    print(f"\n{Style.BRIGHT}{title}:{Style.RESET_ALL}")
+    planned_sprints_to_report = {sprint_id: status_groups for sprint_id, status_groups in planned_issues.items() if status_groups} # Only report sprints with issues
+    for sprint_id, status_groups in sorted(issues_dict.items(), key=sprint_sort_key):
+        sprint_info = sprint_data.get(sprint_id)
+        sprint_name = sprint_info.get("name")
+        start_date_str = sprint_info.get("startDate")
+        end_date_str = sprint_info.get("endDate")
+
+        start_date = datetime.fromisoformat(start_date_str[:-1]).strftime("%Y-%m-%d") if start_date_str else "N/A"
+        end_date = datetime.fromisoformat(end_date_str[:-1]).strftime("%Y-%m-%d") if end_date_str else "N/A"
+
+        print(f"\n{Style.BRIGHT}Sprint: {sprint_name} ({start_date} - {end_date}){Style.RESET_ALL}")  # Include dates
+        for status, issue_list in sorted(status_groups.items()):
+            print(f"  {status}:")
+            for issue in issue_list:
+                color = Fore.GREEN if statusIsDone(status) else Fore.YELLOW if status.lower() == "in progress" else Fore.CYAN
+                print(f"    {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
+
+# Print the report (Corrected Printing Logic - Including Dates)
+print(f"{Style.BRIGHT}Epic Plan Evaluation: {epic_key}{Style.RESET_ALL}")
+
+
 # Print Completed Work (Sorted, with Dates, Excluding Empty Sprints)
-print(f"\n{Style.BRIGHT}Completed Work:{Style.RESET_ALL}")
-completed_sprints_to_report = {sprint_id: status_groups for sprint_id, status_groups in completed_issues.items() if status_groups} # Only report sprints with issues
-for sprint_id, status_groups in sorted(completed_sprints_to_report.items(), key=sprint_sort_key):
-    sprint_info = sprint_data.get(sprint_id)
-    sprint_name = sprint_info.get("name")
-    start_date_str = sprint_info.get("startDate")
-    end_date_str = sprint_info.get("endDate")
-
-    start_date = datetime.fromisoformat(start_date_str[:-1]).strftime("%Y-%m-%d") if start_date_str else "N/A"
-    end_date = datetime.fromisoformat(end_date_str[:-1]).strftime("%Y-%m-%d") if end_date_str else "N/A"
-
-    print(f"\n{Style.BRIGHT}Sprint: {sprint_name} ({start_date} - {end_date}){Style.RESET_ALL}")  # Include dates
-    for status, issue_list in sorted(status_groups.items()):
-        print(f"  {status}:")
-        for issue in issue_list:
-            color = Fore.GREEN if statusIsDone(status) else Fore.YELLOW if status.lower() == "in progress" else Fore.CYAN
-            print(f"    {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
+filter_and_print_sprints("Completed Work", completed_issues, sprint_data)
 
 # Print Planned Work (Sorted, with Dates, Excluding Empty Sprints)
-print(f"\n{Style.BRIGHT}Planned Work:{Style.RESET_ALL}")
-planned_sprints_to_report = {sprint_id: status_groups for sprint_id, status_groups in planned_issues.items() if status_groups} # Only report sprints with issues
-for sprint_id, status_groups in sorted(planned_sprints_to_report.items(), key=sprint_sort_key):
-    sprint_info = sprint_data.get(sprint_id)
-    sprint_name = sprint_info.get("name")
-    start_date_str = sprint_info.get("startDate")
-    end_date_str = sprint_info.get("endDate")
-
-    start_date = datetime.fromisoformat(start_date_str[:-1]).strftime("%Y-%m-%d") if start_date_str else "N/A"
-    end_date = datetime.fromisoformat(end_date_str[:-1]).strftime("%Y-%m-%d") if end_date_str else "N/A"
-
-    print(f"\n{Style.BRIGHT}Sprint: {sprint_name} ({start_date} - {end_date}){Style.RESET_ALL}")  # Include dates
-    for status, issue_list in sorted(status_groups.items()):
-        print(f"  {status}:")
-        for issue in issue_list:
-            color = Fore.GREEN if statusIsDone(status) else Fore.YELLOW if status.lower() == "in progress" else Fore.CYAN
-            print(f"    {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
+filter_and_print_sprints("Planned Work", planned_issues, sprint_data)
 
 # Print Unplanned Work
 if unplanned_issues:

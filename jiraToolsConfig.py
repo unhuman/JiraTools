@@ -31,6 +31,6 @@ def save_config(config):
         json.dump(config, f, indent=4)
 
 def statusIsDone(check_status):
-    doneStatuses = ["closed", "deployed", "done", "resolved"]
+    doneStatuses = ["closed", "deployed", "done", "released", "resolved"]
     return check_status.lower() in doneStatuses
 

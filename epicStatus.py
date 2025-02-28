@@ -132,8 +132,30 @@ def sprint_sort_key(item):  # Custom sort function (Handles None Dates)
     else:
         return datetime.max  # Put sprints without dates at the end
 
+def getTicketColor(status):
+    if statusIsDone(status):
+        return Style.BRIGHT + Fore.GREEN
+    elif status.lower() == "withdrawn":
+        return Fore.GREEN
+    elif status.lower() == "in progress":
+        return Fore.YELLOW
+    else:
+        return Fore.YELLOW
+
+def simple_print_tickets(title, issues_dict):
+    if not issues_dict:
+        return
+
+    print(f"\n{Style.BRIGHT}{title}:{Style.RESET_ALL}")
+    for issue in issues_dict:
+        color = getTicketColor(issue.fields.status.name)
+        print(f"  {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
+
 # Print Planned Work (Sorted, with Dates, Excluding Empty Sprints)
 def filter_and_print_sprints(title, issues_dict, sprint_data):
+    if not issues_dict:
+        return
+
     print(f"\n{Style.BRIGHT}{title}:{Style.RESET_ALL}")
     sprints_to_report = {sprint_id: status_groups for sprint_id, status_groups in issues_dict.items() if status_groups} # Only report sprints with issues
     for sprint_id, status_groups in sorted(sprints_to_report.items(), key=sprint_sort_key):
@@ -149,12 +171,15 @@ def filter_and_print_sprints(title, issues_dict, sprint_data):
         for status, issue_list in sorted(status_groups.items()):
             print(f"  {status}:")
             for issue in issue_list:
-                color = Fore.GREEN if statusIsDone(status) else Fore.YELLOW if status.lower() == "in progress" else Fore.CYAN
+                color = getTicketColor(status)
                 print(f"    {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
 
 # Print the report (Corrected Printing Logic - Including Dates)
 print(f"{Style.BRIGHT}Epic Plan Evaluation: {epic_key}{Style.RESET_ALL}")
 
+# Print unplanned but withdrawn issues
+unplanned_finished_issues = [issue for issue in unplanned_issues if issue.fields.status.name.lower() == "withdrawn" or statusIsDone(issue.fields.status.name)]
+simple_print_tickets("Completed (Withdrawn or Done no sprint) Work", unplanned_finished_issues)
 
 # Print Completed Work (Sorted, with Dates, Excluding Empty Sprints)
 filter_and_print_sprints("Completed Work", completed_issues, sprint_data)
@@ -162,9 +187,6 @@ filter_and_print_sprints("Completed Work", completed_issues, sprint_data)
 # Print Planned Work (Sorted, with Dates, Excluding Empty Sprints)
 filter_and_print_sprints("Planned Work", planned_issues, sprint_data)
 
-# Print Unplanned Work
-if unplanned_issues:
-    print(f"\n{Style.BRIGHT}Unplanned Work:{Style.RESET_ALL}")
-    for issue in unplanned_issues:
-        color = Fore.YELLOW
-        print(f"  {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
+# Print Unplanned Work (but exclude withdrawn issues)
+unplanned_open_issues = [issue for issue in unplanned_issues if issue.fields.status.name.lower() != "withdrawn" and not statusIsDone(issue.fields.status.name)]
+simple_print_tickets("Unplanned Work", unplanned_open_issues)

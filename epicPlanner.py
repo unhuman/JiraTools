@@ -44,6 +44,7 @@ epic = jira_client.issue(epic_key)
 # Search for all issues linked to the epic
 jql = f"\"Epic Link\"={epic_key}"
 issues = jira_client.search_issues(jql)
+print(issues)
 
 # Create a dependency graph
 graph = nx.DiGraph()
@@ -51,9 +52,15 @@ for issue in issues:
     issue_key = issue.key
     graph.add_node(issue_key, status=issue.fields.status.name)
     for link in issue.fields.issuelinks:
-        if link.type.name.lower() == "blocks":
+        link_type = link.type.name.lower()
+        if link_type == "blocks":
             if hasattr(link, 'outwardIssue') and link.outwardIssue and link.outwardIssue.key != issue_key:
                 graph.add_edge(issue_key, link.outwardIssue.key)
+        else:
+            if link_type == "follows" and hasattr(link, 'outwardIssue'):
+                if hasattr(link, 'outwardIssue') and link.outwardIssue and link.outwardIssue.key != issue_key: 
+                    if any(confirmIssue.key == link.outwardIssue.key for confirmIssue in issues):
+                        graph.add_edge(link.outwardIssue.key, issue_key)
 
 # Topological sort
 sorted_issues = list(nx.topological_sort(graph))

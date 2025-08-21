@@ -43,9 +43,9 @@ def build_jql_query(query_type, name):
         '"Story Points" > 0',
         'originalEstimate is EMPTY',
         'issuetype not in (subTaskIssueTypes(), "Test Case Execution", "Test Execution", Test, DBCR)',
-        'status IN ("Acceptance", "Approved to Deploy", Certified, Closed, Complete, Deployed, Done, Released, "Ready for Deployment", "Ready For Release", "Ready to Deploy", "Ready to Release", Resolved, Withdrawn)',
-        'status CHANGED TO ("Acceptance", "Approved to Deploy", Certified, Closed, Complete, Deployed, Done, "Ready for Deployment", "Ready For Release", "Ready to Deploy", "Ready to Release", Released, Resolved, Withdrawn) AFTER startOfYear()'
-        'ORDER BY key ASC'
+        'status IN ("Acceptance", "Approved to Deploy", Certified, Closed, Complete, Completed, Deployed, Done, "Ready for Deployment", "Ready For Release", "Ready to Deploy", "Ready to Release", Released, Resolved, Withdrawn)',
+        'status CHANGED TO ("Acceptance", "Approved to Deploy", Certified, Closed, Complete, Completed, Deployed, Done, "Ready for Deployment", "Ready For Release", "Ready to Deploy", "Ready to Release", Released, Resolved, Withdrawn) AFTER startOfYear()' # no comma here
+        ' ORDER BY key ASC'
     ]
 
     # Add the assignee or team condition

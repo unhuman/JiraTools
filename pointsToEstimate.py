@@ -10,7 +10,9 @@ from jiraToolsConfig import load_config
 
 # Configuration constants
 STORY_POINTS_FIELD = 'customfield_10502'  # Story Points custom field ID
+TIME_TRACKING_FIELD = 'timetracking'  # Time Tracking field
 ORIGINAL_ESTIMATE_FIELD = 'originalEstimate'  # Original Estimate field (for updates)
+REMAINING_ESTIMATE_FIELD = 'remainingEstimate' # Remaining Estimate field
 MINUTES_PER_POINT = 360  # Minutes per story point (1 point = 1 day = 6 hours = 360 minutes)
 
 def safe_jira_update(issue, fields):
@@ -90,7 +92,7 @@ except jira.exceptions.JIRAError as e:
 
 # Search for issues using the built JQL query
 try:
-    issues = jira_client.search_issues(jql_query, maxResults=False, fields=f"summary,{STORY_POINTS_FIELD},{ORIGINAL_ESTIMATE_FIELD}")
+    issues = jira_client.search_issues(jql_query, maxResults=False, fields=f"summary,{STORY_POINTS_FIELD},{TIME_TRACKING_FIELD}")
     print(f"{Style.BRIGHT}Found {len(issues)} issues matching the query.{Style.RESET_ALL}")
 except jira.exceptions.JIRAError as e:
     print(f"{Fore.RED}Error executing JQL query: {e}{Style.RESET_ALL}")
@@ -107,7 +109,12 @@ skipped_count = 0
 for issue in issues:
     issue_key = issue.key
     story_points = getattr(issue.fields, STORY_POINTS_FIELD, None)  # Story Points field
-    original_estimate = getattr(issue.fields, ORIGINAL_ESTIMATE_FIELD, None)  # Original Estimate field
+
+    # Extract original_estimate from timetracking if present
+    original_estimate = None
+    timetracking = getattr(issue.fields, TIME_TRACKING_FIELD, None)
+    if timetracking is not None:
+        original_estimate = getattr(timetracking, ORIGINAL_ESTIMATE_FIELD, None)
 
     # Check if issue has story points but no original estimate
     if story_points is not None and original_estimate is None:
@@ -117,9 +124,9 @@ for issue in issues:
             try:
                 # Update both original and remaining estimates using timetracking structure
                 # Since we're only finding completed tickets, always set remaining to 0
-                safe_jira_update(issue, {'timetracking': {
-                    'originalEstimate': estimate_value,
-                    'remainingEstimate': '0m'
+                safe_jira_update(issue, {TIME_TRACKING_FIELD: {
+                    ORIGINAL_ESTIMATE_FIELD: estimate_value,
+                    REMAINING_ESTIMATE_FIELD: '0m'
                 }})
                 print(f"{Fore.GREEN}{issue_key}{Style.RESET_ALL}: {issue.fields.summary}")
                 print(f"  ✓ Set original estimate to: {Fore.GREEN}{estimate_value}{Style.RESET_ALL} (from {story_points} story points)")

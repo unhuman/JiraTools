@@ -3,3 +3,6 @@ __pycache__/
 .vscode/
 env*/
 JiraTools.iml
+team_ticket_defaults.xlsx
+single_ticket_test.xlsx
+~*

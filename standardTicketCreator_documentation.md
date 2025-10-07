@@ -30,15 +30,15 @@ python standardTicketCreator.py excel_file [options]
 
 ### Command-line Arguments
 - `excel_file`: Path to the Excel file containing team data (required)
-- `-i, --issue_type`: Issue type (e.g., 'Task', 'Story', 'Bug'). If provided, overrides the value in Config sheet.
+- `-i, --issue_type`: Issue type (e.g., 'Task', 'Story', 'Bug'). If provided, overrides the value in the Teams sheet.
 - `-c, --create`: Actually create tickets in Jira. Without this flag, the script runs in dry-run mode
 - `--processTeams`: Comma-separated list of teams to process (only these teams will be included)
 - `--excludeTeams`: Comma-separated list of teams to exclude from processing
 
 The issue type is determined in this order of precedence:
 1. Command-line argument `-i` if provided
-2. Value from the Config sheet with key "Issue Type" if present
-3. Default value "Task" if neither of the above is available
+2. Team-specific "Issue Type" from the Teams sheet if present
+3. Default value "Task" if none of the above is available
 
 Additionally, the script uses the Priority value from the Config sheet with key "Priority" if present. This priority will be applied to all tickets created.
 
@@ -106,9 +106,13 @@ The script expects a specific structure in the Excel file:
 
 ### Required Sheets
 
-1. **Teams**: Contains team information including Project and SO Epic details
-2. **Config**: Contains configuration settings like Issue Type
+1. **Teams**: Contains team information including Project, Epic Link, and Issue Type details
+2. **Config**: Contains configuration settings like Priority
 3. **Ownership**, **Quality**, **Security**, **Reliability**: These are the standard tabs that the script processes
+
+### Optional Sheets
+
+1. **CustomFields**: Maps field names to Jira custom field IDs
 
 Each sheet should be formatted with rows of data as described below.
 
@@ -119,14 +123,14 @@ Your Excel file should have the following sheets and formats:
 #### Config Sheet
 | Key | Value |
 |-----|-------|
-| Issue Type | Story |
+| Priority | 4-Medium |
 
 #### Teams Sheet
-| Sprint Team | Assignee | Project | SO Epic |
-|-------------|----------|---------|---------|
-| TeamA | jdoe | RND | RND-12345 |
-| TeamB | msmith | DEV | DEV-56789 |
-| TeamC | rjones | QA | QA-34567 |
+| Sprint Team | Assignee | Project | Epic Link | Issue Type |
+|-------------|----------|---------|----------|------------|
+| TeamA | jdoe | RND | RND-12345 | Story |
+| TeamB | msmith | DEV | DEV-56789 | Task |
+| TeamC | rjones | QA | QA-34567 | Bug |
 
 #### Ownership Sheet
 | Team | L1 | L2 | L3 |
@@ -138,6 +142,21 @@ Your Excel file should have the following sheets and formats:
 #### Quality Sheet
 | Team | Q1 | Q2 | Q3 |
 |------|----|----|-----|
+
+#### CustomFields Sheet (Optional)
+| Field Name | Custom Field ID | Data Wrapper |
+|------------|----------------|--------------|
+| Sprint Team | customfield_10123 | value |
+| Story Points | customfield_10002 | none |
+| Epic Link | customfield_10100 | value |
+
+The **Data Wrapper** column controls how field values are formatted when sent to the Jira API:
+- When set to "value": The value is wrapped like `{"value": "field_value"}`
+- When set to "none" or left empty: The value is sent directly without wrapping
+- Any other string: The value is wrapped using that string as the key: `{"wrapper_name": "field_value"}`
+
+This flexibility allows compatibility with different Jira custom field formats.
+
 | TeamA |   | X |   |
 | TeamB | X |   | X |
 | TeamC |   | X |   |
@@ -170,8 +189,7 @@ Available keys:
 
 | Key | Example Value | Description |
 |-----|---------------|-------------|
-| Issue Type | Task | The type of Jira issue to create (Task, Story, Bug, etc.) |
-| Priority | Medium | The priority to set for all created tickets (High, Medium, Low, etc.) |
+| Priority | 4-Medium | The priority to set for all created tickets (e.g., "3-High", "4-Medium", "5-Low") |
 
 Example format:
 
@@ -186,18 +204,19 @@ The Teams sheet contains configuration for each team with the following columns:
 
 - **Sprint Team**: The team identifier (used to match with other tabs)
 - **Assignee**: The person to assign tickets to
-- **Project**: The Jira project key for ticket creation (NOT the issue type)
-- **SO Epic**: The parent epic key to link created tickets to
+- **Project**: The Jira project key for ticket creation
+- **Epic Link**: The parent epic key to link created tickets to
+- **Issue Type**: (Optional) The Jira issue type for tickets created for this team (e.g., Story, Task, Bug)
 
-Note: The issue type is specified in the Config sheet or via command line parameter (-i). The priority is specified in the Config sheet with key "Priority".
+Note: If Issue Type is not specified in the Teams sheet, it will use the default "Task" value or the command line parameter (-i) if provided. The priority is specified in the Config sheet with key "Priority".
 
 Example format:
 
-| Sprint Team | Assignee | Project | SO Epic |
-|-------------|----------|---------|---------|
-| TeamA | jdoe | RND | RND-12345 |
-| TeamB | msmith | DEV | DEV-56789 |
-| TeamC | rjones | QA | QA-34567 |
+| Sprint Team | Assignee | Project | Epic Link | Issue Type |
+|-------------|----------|---------|----------|------------|
+| TeamA | jdoe | RND | RND-12345 | Story |
+| TeamB | msmith | DEV | DEV-56789 | Task |
+| TeamC | rjones | QA | QA-34567 | Bug |
 
 Each team should have a unique name in the Sprint Team column as this is used to match with team names in other tabs.
 
@@ -205,7 +224,8 @@ Each team should have a unique name in the Sprint Team column as this is used to
 
 1. **Unique Team Names**: Each team must have a unique name in the Sprint Team column
 2. **Valid Project Keys**: The Project column must contain valid Jira project keys
-3. **Epic Format**: The SO Epic column should contain valid Jira epic issue keys (e.g., PRJ-1234)
+3. **Epic Format**: The Epic Link column should contain valid Jira epic issue keys (e.g., PRJ-1234)
+4. **Issue Types**: The Issue Type column should contain valid Jira issue types (e.g., Story, Task, Bug)
 4. **Assignee Names**: The Assignee column should contain valid Jira usernames
 
 ### Category Tabs (Ownership, Quality, Security, Reliability)
@@ -235,7 +255,7 @@ For each team in each category tab (Ownership, Quality, Security, Reliability):
    - A ticket is created in the team's specified Jira project (from "Project" column)
    - The summary is formatted as "[Team Name] Scorecards Improvement: [Tab Name]" (e.g., "Analytics Scorecards Improvement: Ownership")
    - The description includes the tab name (e.g., "Category: Ownership") and the selected categories
-   - The ticket is linked to the specified epic in the "SO Epic" column
+   - The ticket is linked to the specified epic in the "Epic Link" column
    - The ticket is assigned to the person in the "Assignee" column
 
 2. If a team has no selections in a category tab, no ticket will be created for that team in that category
@@ -258,7 +278,7 @@ L1: X, L3: X
 
 ### Ticket Linking
 
-Tickets are automatically linked to parent epics specified in the "SO Epic" field of the Teams sheet. This ensures all related tickets are properly organized under their parent epic in Jira.
+Tickets are automatically linked to parent epics specified in the "Epic Link" field of the Teams sheet. This ensures all related tickets are properly organized under their parent epic in Jira.
 
 ## Output
 
@@ -311,13 +331,13 @@ The script provides detailed output:
 7. **Linking failure**:
    - Warning: `Warning: Could not link ticket [issue_key] to epic [epic_key]`
    - Solutions:
-     - Verify the SO Epic key is valid and exists in Jira
+     - Verify the Epic Link key is valid and exists in Jira
      - Ensure your Jira user has permission to link to that epic
      - Check if your Jira instance uses a custom field for epic links
 
 8. **Invalid epic key**:
    - Symptom: Warning about linking failure with an error about the epic key
-   - Solution: Ensure the SO Epic value is a valid Jira issue key (e.g., PRJ-1234)
+   - Solution: Ensure the Epic Link value is a valid Jira issue key (e.g., PRJ-1234)
 
 ### Advanced Troubleshooting
 
@@ -328,6 +348,13 @@ The script provides detailed output:
 10. **Jira field mapping issues**:
     - Error: `Field '[field_name]' cannot be set. It is not on the appropriate screen, or unknown`
     - Solution: Use the findCustomFields.py script to identify the correct field ID for your Jira instance
+    - Solution: Create a CustomFields sheet to map your field names to the correct Jira custom field IDs
+    
+11. **Custom field values not being sent properly**:
+    - Symptom: Custom field values are not appearing in Jira tickets when created
+    - Solution: Add the field to the CustomFields sheet with the proper custom field ID
+    - Solution: Verify the field format in the CustomFields sheet is correct (e.g., "Sprint Team" maps to "customfield_10123")
+    - Note: Many custom fields require values in the format {"value": "your_value"}, which the script handles automatically
 
 11. **Team filtering issues**:
     - Warning: `Warning: Some specified teams not found in Teams sheet` or `Warning: No teams match the filter criteria`
@@ -342,6 +369,58 @@ The script provides detailed output:
 - Teams without any category selections are skipped
 - The script automatically handles different Jira configurations for epic linking
 - Team filtering parameters (`--processTeams` and `--excludeTeams`) can be used to process a subset of teams
+
+## CustomFields Sheet
+
+The CustomFields sheet provides a way to map human-readable field names to Jira custom field IDs without modifying the code.
+
+### Purpose
+
+- Maps user-friendly field names to Jira's internal custom field IDs (e.g., `customfield_10123`)
+- Allows adding new custom fields or updating field IDs without code changes
+- Makes the Excel file easier to understand by using readable field names
+
+### Format
+
+The CustomFields sheet should have three columns:
+1. **Field Name**: The user-friendly name used in other sheets (e.g., "Sprint Team")
+2. **Custom Field ID**: The corresponding Jira custom field ID (e.g., "customfield_10123")
+3. **Data Wrapper**: (Optional) How to format the field value for the Jira API:
+   - "value": Format as `{"value": field_value}` (most common for custom fields)
+   - "none" or empty: Use the value directly without wrapping
+   - Any other string: Use as the wrapper name, e.g., "name" creates `{"name": field_value}`
+
+Example:
+```
+| Field Name      | Custom Field ID   | Data Wrapper |
+|-----------------|------------------|--------------|
+| Sprint Team     | customfield_10123| value        |
+| Story Points    | customfield_10002| none         |
+| Epic Link       | customfield_10100| value        |
+| Reporter        | reporter         | name         |
+```
+
+### How It Works
+
+When a field name in your Teams sheet or category sheets matches an entry in the CustomFields sheet:
+
+1. The script will automatically use the corresponding custom field ID when creating the ticket
+2. The value will be formatted based on the Data Wrapper column:
+   - If set to "value": formatted as `{"value": "field_value"}`
+   - If set to "none" or empty: used directly without wrapping
+   - If set to any other value (e.g., "name"): formatted as `{"name": "field_value"}`
+3. This allows you to use consistent field names across your Excel file while ensuring the correct Jira field IDs and data formats are used
+
+### Special Handling for Assignee Field
+
+The assignee field is handled differently from other fields to ensure reliable ticket assignment:
+
+1. The assignee value is extracted from fields before creating the ticket
+2. The ticket is first created without an assignee
+3. After successful ticket creation, a separate API request sets the assignee
+4. This approach avoids potential issues with assignee field formatting during initial ticket creation
+
+This special handling ensures that ticket assignments work reliably across different Jira configurations and project settings.
 
 ## Tips for Excel File Management
 
@@ -386,7 +465,7 @@ The script provides detailed output:
 
 2. **Missing Projects**: Every team must have a Project value in the Teams sheet
 
-3. **Invalid Epic Keys**: Make sure SO Epic values are valid Jira issue keys
+3. **Invalid Epic Keys**: Make sure Epic Link values are valid Jira issue keys
 
 4. **Special Characters**: Avoid using special characters in team names
 
@@ -422,7 +501,7 @@ The script facilitates cross-team coordination by:
 For teams with recurring maintenance work:
 
 1. Create a template with standard categories
-2. Update only the SO Epic field for each sprint
+2. Update only the Epic Link field for each sprint
 3. Run the script to create consistent tickets each sprint
 
 ## Customization and Advanced Usage
@@ -455,3 +534,15 @@ python standardTicketCreator.py teams.xlsx -i Story -c
 - **CI/CD Pipeline**: Run automatically after sprint planning to create standard tickets
 - **Change Tracking**: Store Excel files in version control to track changes over time
 - **Reporting**: Create follow-up scripts to analyze ticket creation patterns
+
+## Version History
+
+### Version 1.1 (October 2025)
+- Added support for CustomFields sheet to map field names to Jira custom field IDs
+- Fixed issue with Sprint Team field not being properly passed to the Jira API
+- Improved error handling and logging for API requests
+
+### Version 1.0 (Initial Release)
+- Base functionality for creating tickets from Excel data
+- Support for Teams, Config, and category sheets
+- Team filtering with --processTeams and --excludeTeams parameters

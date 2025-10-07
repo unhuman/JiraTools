@@ -1,6 +1,15 @@
 # This script creates standard Jira tickets based on data from an Excel file
 # Runs in dry-run mode by default - use -c/--create to actually create tickets
 # pip install colorama | jira | pandas | openpyxl
+#
+# Custom Fields Configuration:
+# - Define custom fields in the "CustomFields" sheet with columns:
+#   1. Field Name: Name of the field in Excel (e.g., "Sprint Team", "Epic Link")
+#   2. Field ID: Jira custom field ID (e.g., "customfield_10001")
+#   3. Data Wrapper: (Optional) How to format the field value in the API request
+#      - If set to "value" -> {"value": field_value}
+#      - If set to "none" or left empty -> field_value (directly)
+#      - Any other value will be used as the wrapper key -> {wrapper: field_value}
 
 import argparse
 import os
@@ -11,16 +20,42 @@ import sys
 import json
 import requests
 import traceback
+from collections import defaultdict
 from jiraToolsConfig import load_config
 
-# static array of Tabs to process in the excel file.
-TAB_NAMES = ["Ownership", "Quality", "Security", "Reliability"]
+# Class to represent a ticket with ID and summary
+class TicketInfo:
+    def __init__(self, ticket_id, summary):
+        self.ticket_id = ticket_id
+        self.summary = summary
+    
+    def __str__(self):
+        return self.ticket_id
+
+# Class to track simulated ticket counters in dry-run mode
+class SimulatedTicketCounter:
+    def __init__(self):
+        self.counters = defaultdict(int)
+    
+    def get_next_ticket_id(self, project_key):
+        """Generate a simulated ticket ID with format: simulated-PROJECT-COUNTER"""
+        self.counters[project_key] += 1
+        counter = self.counters[project_key]
+        return f"simulated-{project_key}-{counter}"
+
+# Global counter for simulated tickets
+simulated_ticket_counter = SimulatedTicketCounter()
+
+# static array of Sheets to process in the excel file.
+SHEET_NAMES = ["Ownership", "Quality", "Security", "Reliability"]
 
 # Constants for column names
+ASSIGNEE_FIELD = "Assignee"
 PROJECT_FIELD = "Project"
-SERVICE_OWNERSHIP_EPIC_FIELD = "SO Epic"
+EPIC_LINK_FIELD = "Epic Link"
 EPIC_LINK_TYPE = "Epic-Story Link"  # The link type used to connect stories to epics
 CONFIG_SHEET = "Config"
+CUSTOM_FIELDS_SHEET = "CustomFields"  # Sheet for custom field mappings
 ISSUE_TYPE_KEY = "Issue Type"
 PRIORITY_KEY = "Priority"  # The key for the Priority field in the Config sheet
 
@@ -39,7 +74,7 @@ def parse_arguments():
     parser.epilog = ("Note: Project key is determined by the 'Project' field in the Teams sheet.\n"
                    "Issue type is determined by the 'Issue Type' field in the Teams sheet.\n"
                    "Priority is read from the 'Config' sheet with key 'Priority'.\n"
-                   "Each ticket will be linked to the 'SO Epic' specified in the Teams sheet.\n"
+                   "Each ticket will be linked to the 'Epic Link' specified in the Teams sheet.\n"
                    "Use --processTeams to specify which teams to process or --excludeTeams to exclude specific teams.")
     
     return parser.parse_args()
@@ -62,6 +97,52 @@ def read_config_sheet(file_path):
         return config
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Could not read Config sheet: {str(e)}. Using default values.{Style.RESET_ALL}")
+        return {}
+        
+def read_custom_fields_mapping(file_path):
+    """Read the CustomFields sheet from the Excel file to get custom field mappings.
+    
+    The CustomFields sheet should have the following columns:
+    1. Field Name: The name of the field as it appears in Excel data
+    2. Field ID: The Jira custom field ID (e.g., customfield_10001)
+    3. Data Wrapper: (Optional) How to format the value in the API request:
+       - If "value" -> the field will be formatted as {"value": field_value}
+       - If empty or "none" -> the field value will be used directly
+       - Any other string -> the field will be formatted as {wrapper: field_value}
+    """
+    try:
+        # Read the CustomFields sheet
+        df = pd.read_excel(file_path, sheet_name=CUSTOM_FIELDS_SHEET)
+        
+        # Convert to a key-value dictionary with data wrapper information
+        custom_fields_mapping = {}
+        for _, row in df.iterrows():
+            if len(row) >= 2:  # Ensure the row has at least 2 columns
+                field_name = str(row.iloc[0]).strip()
+                custom_field_id = str(row.iloc[1]).strip()
+                
+                # Check if Data Wrapper column exists (should be the 3rd column)
+                data_wrapper = None
+                if len(row) >= 3 and pd.notna(row.iloc[2]):
+                    data_wrapper = str(row.iloc[2]).strip()
+                    # If data_wrapper is "none" (case insensitive), set to None
+                    if data_wrapper.lower() == "none":
+                        data_wrapper = None
+                
+                if field_name and custom_field_id != 'nan':
+                    # Store both the field ID and data wrapper information
+                    custom_fields_mapping[field_name] = {
+                        "id": custom_field_id,
+                        "wrapper": data_wrapper
+                    }
+        
+        print(f"{Fore.CYAN}Loaded {len(custom_fields_mapping)} custom field mappings{Style.RESET_ALL}")
+        for field_name, mapping in custom_fields_mapping.items():
+            wrapper_info = f"wrapper: '{mapping['wrapper']}'" if mapping['wrapper'] else "no wrapper"
+            print(f"{Fore.CYAN}  Field '{field_name}' → {mapping['id']} ({wrapper_info}){Style.RESET_ALL}")
+        return custom_fields_mapping
+    except Exception as e:
+        print(f"{Fore.YELLOW}Warning: Could not read CustomFields sheet: {str(e)}. No custom field mappings will be used.{Style.RESET_ALL}")
         return {}
 
 def validate_file(file_path):
@@ -169,6 +250,33 @@ def validate_data(df):
     
     return True
 
+def assign_ticket(jira_client, issue_key, assignee_name):
+    """Set the assignee for a ticket using a separate API request.
+    
+    Args:
+        jira_client: The Jira client instance
+        issue_key: The key of the issue to update (e.g., PRJ-123)
+        assignee_name: The username of the assignee to set
+        
+    Returns:
+        bool: True if successful, False if failed
+    """
+    if not assignee_name or str(assignee_name).lower() == 'nan':
+        print(f"{Fore.YELLOW}Skipping assignee update - no assignee specified{Style.RESET_ALL}")
+        return False
+        
+    try:
+        print(f"{Fore.CYAN}Setting assignee for {issue_key} to '{assignee_name}' with separate API request{Style.RESET_ALL}")
+        
+        # Use the standard Jira API method to assign the issue
+        jira_client.assign_issue(issue_key, assignee_name)
+        print(f"{Fore.GREEN}Successfully set assignee for {issue_key} to '{assignee_name}'{Style.RESET_ALL}")
+        return True
+            
+    except Exception as e:
+        print(f"{Fore.YELLOW}Warning: Could not set assignee for ticket {issue_key}: {str(e)}{Style.RESET_ALL}")
+        return False
+
 def link_to_epic(jira_client, issue_key, epic_key):
     """Link an issue to an epic using various methods."""
     if not epic_key or str(epic_key) == 'nan':
@@ -213,7 +321,7 @@ def validate_required_fields(project_key, issue_type, summary):
     
     return errors
 
-def prepare_issue_dict(project_key, issue_type, summary, description, fields):
+def prepare_issue_dict(project_key, issue_type, summary, description, fields, custom_fields_mapping=None):
     """Prepare the issue dictionary for Jira API."""
     # Validate required fields
     validation_errors = validate_required_fields(project_key, issue_type, summary)
@@ -231,28 +339,41 @@ def prepare_issue_dict(project_key, issue_type, summary, description, fields):
         'issuetype': {'name': issue_type},
     }
     
-    # Extract SO Epic field if present for special handling later
-    epic_field_name = SERVICE_OWNERSHIP_EPIC_FIELD
+    # Extract Epic Link field if present for traditional linking method
+    epic_field_name = EPIC_LINK_FIELD
     epic_value = None
     
     # Make a copy of fields to preserve the original
     fields_copy = fields.copy()
     
-    # Check if SO Epic field is present
+    # Check if Epic Link field is present - only extract value for possible link creation
     if epic_field_name in fields_copy:
-        epic_value = fields_copy.pop(epic_field_name)
+        epic_value = fields_copy[epic_field_name]
+        # Do not remove from fields_copy since we want all fields to be processed uniformly
+        # including Epic Link through the normal custom fields process
     
-    # Process fields to add to the issue dictionary
-    process_fields_for_jira(fields_copy, issue_dict)
+    # Process all fields to add to the issue dictionary with uniform handling
+    process_fields_for_jira(fields_copy, issue_dict, custom_fields_mapping)
     
     # Return the prepared data
     return (issue_dict, epic_value)
 
-def process_fields_for_jira(fields, issue_dict):
-    """Process and filter fields before sending to Jira API."""
+def process_fields_for_jira(fields, issue_dict, custom_fields_mapping=None):
+    """Process and filter fields before sending to Jira API.
+    
+    This function handles three types of fields:
+    1. Standard Jira fields (with specific formatting requirements)
+    2. Direct custom fields (already have customfield_XXXXX format)
+    3. Mapped custom fields (using the custom_fields_mapping parameter)
+    
+    For mapped custom fields, the formatting depends on the Data Wrapper setting:
+    - With wrapper "value": {"value": field_value}
+    - With no wrapper (None): field_value directly
+    - With custom wrapper: {wrapper: field_value}
+    """
     # Define known Jira standard fields that require special handling
+    # Note: 'assignee' is deliberately excluded as it's handled separately after ticket creation
     standard_fields = {
-        # 'assignee': 'name', # assignee field does not work on initial create
         'reporter': 'name',
         'priority': 'name',
         'components': 'name',  # List of component names
@@ -267,6 +388,11 @@ def process_fields_for_jira(fields, issue_dict):
         # Skip empty, NaN values, or special fields not meant for Jira API
         if not value or str(value).lower() == 'nan' or field == 'Project':
             continue
+        
+        # Skip assignee field as it's handled separately after ticket creation
+        if field.lower() == 'assignee':
+            print(f"{Fore.YELLOW}Skipping 'assignee' field during initial ticket creation - will be set afterwards{Style.RESET_ALL}")
+            continue
             
         # Handle standard fields with special formatting requirements
         field_lower = field.lower()
@@ -277,6 +403,24 @@ def process_fields_for_jira(fields, issue_dict):
         # Handle custom fields and other fields (always prefixed with 'customfield_' or contain a dot)
         elif field.startswith('customfield_') or '.' in field:
             issue_dict[field] = value
+
+        # Check if field is in the custom fields mapping, use the mapping to get the actual field ID
+        elif custom_fields_mapping and field in custom_fields_mapping:
+            mapping = custom_fields_mapping[field]
+            custom_field_id = mapping["id"]
+            wrapper = mapping.get("wrapper")
+            
+            # Format based on wrapper setting
+            if wrapper is None:
+                # No wrapper - use value directly
+                issue_dict[custom_field_id] = value
+                print(f"{Fore.GREEN}Mapped field '{field}' to custom field '{custom_field_id}' with direct value: {value}{Style.RESET_ALL}")
+            else:
+                # Use specified wrapper
+                wrapped_value = {wrapper: value}
+                issue_dict[custom_field_id] = wrapped_value
+                print(f"{Fore.GREEN}Mapped field '{field}' to custom field '{custom_field_id}' with wrapper '{wrapper}': {wrapped_value}{Style.RESET_ALL}")
+
         else:
             # Skip unknown fields to avoid API errors
             print(f"{Fore.YELLOW}Skipping unknown field '{field}' to avoid Jira API errors{Style.RESET_ALL}")
@@ -489,15 +633,32 @@ def handle_bad_request(response):
     print(f"{Fore.YELLOW}4. Standard fields like 'assignee' need object format: {{'name': 'username'}}{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}5. Authentication or permissions issues{Style.RESET_ALL}")
 
-def create_jira_ticket(jira_client, project_key, issue_type, summary, description, **fields):
+def create_jira_ticket(jira_client, project_key, issue_type, summary, description, excel_file=None, **fields):
+
     """Create a Jira ticket with the given fields."""
     # Add a separator for better log readability
     print(f"\n{Fore.CYAN}{'=' * 80}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}Creating Jira ticket for {project_key} - {summary}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'-' * 80}{Style.RESET_ALL}")
     
+    # Load custom fields mapping if excel file is provided
+    custom_fields_mapping = None
+    if excel_file:
+        try:
+            custom_fields_mapping = read_custom_fields_mapping(excel_file)
+        except Exception as e:
+            print(f"{Fore.YELLOW}Warning: Could not load custom fields mapping: {e}{Style.RESET_ALL}")
+    
+    # Extract assignee before preparing the issue dictionary, if present
+    fields = fields.copy()  # Make a copy to avoid modifying the original
+    assignee_name = None
+    if ASSIGNEE_FIELD in fields:
+        print(f"{Fore.CYAN}Found assignee{Style.RESET_ALL}")
+        assignee_name = fields[ASSIGNEE_FIELD]
+        del fields[ASSIGNEE_FIELD]  # Remove from fields to avoid issues during creation
+
     # Prepare the issue dictionary
-    issue_data = prepare_issue_dict(project_key, issue_type, summary, description, fields)
+    issue_data = prepare_issue_dict(project_key, issue_type, summary, description, fields, custom_fields_mapping)
     issue_dict, epic_link = issue_data
     
     # Log the content being sent to Jira API in a readable format
@@ -512,13 +673,19 @@ def create_jira_ticket(jira_client, project_key, issue_type, summary, descriptio
         
         # Create the issue with extended error handling
         new_issue = jira_client.create_issue(fields=issue_dict)
-        
         print(f"{Fore.GREEN}Successfully created ticket: {new_issue.key}{Style.RESET_ALL}")
-        
-        # Link to parent epic if specified
+
+        # Set assignee with a separate API request if specified
+        if assignee_name:
+            assign_ticket(jira_client, new_issue.key, assignee_name)
+    
+        # Link to parent epic if specified and if we don't have a custom field mapping
         if epic_link and str(epic_link) != 'nan':
-            if link_to_epic(jira_client, new_issue.key, epic_link):
-                print(f"{Fore.CYAN}Linked ticket {new_issue.key} to parent epic {epic_link}{Style.RESET_ALL}")
+            # Only use the traditional linking method if we don't have a custom field mapping
+            # or if the Epic Link field isn't in the mapping
+            if not custom_fields_mapping or EPIC_LINK_FIELD not in custom_fields_mapping:
+                if link_to_epic(jira_client, new_issue.key, epic_link):
+                    print(f"{Fore.CYAN}Linked ticket {new_issue.key} to parent epic {epic_link} using traditional link method{Style.RESET_ALL}")
         
         return new_issue
         
@@ -540,7 +707,7 @@ def display_data_info(df, excel_file):
     print(f"Number of tickets to create: {len(df)}")
     print(f"Columns: {', '.join(df.columns)}")
 
-def confirm_operation(args, tab_count=None, issue_type=None):
+def confirm_operation(args, sheet_count=None, issue_type=None):
     """Confirm operation mode with the user."""
     if issue_type is None:
         issue_type = "Task"  # Default if not specified
@@ -553,8 +720,8 @@ def confirm_operation(args, tab_count=None, issue_type=None):
     
     # Confirm before proceeding with actual ticket creation
     if args.create:
-        if tab_count is not None and tab_count > 0:
-            confirm = input(f"\n{Fore.YELLOW}WARNING: This will create actual tickets in Jira from {tab_count} tabs. Continue? (y/n): {Style.RESET_ALL}")
+        if sheet_count is not None and sheet_count > 0:
+            confirm = input(f"\n{Fore.YELLOW}WARNING: This will create actual tickets in Jira from {sheet_count} sheets. Continue? (y/n): {Style.RESET_ALL}")
         else:
             confirm = input(f"\n{Fore.YELLOW}WARNING: This will create actual tickets in Jira. Continue? (y/n): {Style.RESET_ALL}")
         
@@ -581,9 +748,9 @@ def group_rows_by_key(df):
     
     return ticket_data
 
-def format_summary(summary, tab_name):
-    """Format summary with tab name according to the specified format."""
-    if not tab_name:
+def format_summary(summary, sheet_name):
+    """Format summary with sheet name according to the specified format."""
+    if not sheet_name:
         return summary
     
     # Extract the team name from summary (usually it's just the team name)
@@ -591,8 +758,8 @@ def format_summary(summary, tab_name):
     if isinstance(summary, list):
         team_name = ', '.join(map(str, summary))
     
-    # Format as "Team Scorecards Improvement: TabName"
-    return f"{team_name} Scorecards Improvement: {tab_name}"
+    # Format as "<Team Name> Scorecards Improvement: <Sheet Name>"
+    return f"{team_name} Scorecards Improvement: {sheet_name}"
 
 def add_team_fields(additional_fields, team_info):
     """Add team fields to additional fields without overriding existing values."""
@@ -606,17 +773,17 @@ def add_team_fields(additional_fields, team_info):
     
     return result
 
-def enhance_description_with_grouped_fields(description, grouped_fields, tab_name=None):
-    """Enhance description with the grouped fields information and tab name."""
+def enhance_description_with_grouped_fields(description, grouped_fields, sheet_name=None):
+    """Enhance description with the grouped fields information and sheet name."""
     if not description:
         description = ""
     
-    # Add tab name at the beginning of the description if provided
-    if tab_name:
+    # Add sheet name at the beginning of the description if provided
+    if sheet_name:
         if description:
-            description = f"*Backstage Scorecards Category:* {tab_name}\n\n{description}"
+            description = f"*Backstage Scorecards Category:* {sheet_name}\n\n{description}"
         else:
-            description = f"*Backstage Scorecards Category:* {tab_name}"
+            description = f"*Backstage Scorecards Category:* {sheet_name}"
     
     # Add an empty line if the description is not empty
     if description and not description.endswith('\n\n'):
@@ -635,7 +802,7 @@ def enhance_description_with_grouped_fields(description, grouped_fields, tab_nam
     
     return description.rstrip()
 
-def prepare_ticket_fields(fields, key, team_mapping, tab_name):
+def prepare_ticket_fields(fields, key, team_mapping, sheet_name):
     """Prepare ticket fields with team mapping data."""
     # Extract basic fields
     summary = fields.get('Summary', key)
@@ -647,7 +814,10 @@ def prepare_ticket_fields(fields, key, team_mapping, tab_name):
     # Initialize variables to be extracted from team_info if available
     project = None
     issue_type = None
-    
+
+    # Add team fields without overriding
+    additional_fields['Sprint Team'] = key  # Always set Sprint Team to the team key
+
     # Check if this team is in the filtered team mapping
     if team_mapping is not None and key not in team_mapping:
         # Set a flag to indicate this team was filtered out
@@ -665,30 +835,31 @@ def prepare_ticket_fields(fields, key, team_mapping, tab_name):
         if ISSUE_TYPE_KEY in team_info:
             issue_type = team_info[ISSUE_TYPE_KEY]
         
-        # Format summary with tab name
-        summary = format_summary(summary, tab_name)
+        # Format summary with sheet name
+        summary = format_summary(summary, sheet_name)
         
-        # Add team fields without overriding
         additional_fields = add_team_fields(additional_fields, team_info)
         
         # Use team description if none provided
         if not description and 'Description' in team_info:
             description = team_info['Description']
-    elif tab_name:
-        # If no team mapping but we have a tab name, still format the summary
-        summary = format_summary(summary, tab_name)
+    elif sheet_name:
+        # If no team mapping but we have a sheet name, still format the summary
+        summary = format_summary(summary, sheet_name)
     
     # Group related fields - this returns fields for API and grouped fields for display
     fields_for_api, grouped_display_fields = group_related_fields(additional_fields)
-    
-    # Enhance description with grouped fields information and tab name
-    description = enhance_description_with_grouped_fields(description, grouped_display_fields, tab_name)
-    
+
+    # Enhance description with grouped fields information and sheet name
+    description = enhance_description_with_grouped_fields(description, grouped_display_fields, sheet_name)
+
     return summary, description, fields_for_api, project, issue_type
 
 def get_display_mode_info(is_dry_run, ticket_key):
     """Get the mode prefix and color for ticket display."""
     if is_dry_run:
+        if ticket_key and ticket_key.startswith("simulated-"):
+            return f"[DRY RUN] Would create (simulated ID: {ticket_key})", Fore.BLUE
         return "[DRY RUN] Would create", Fore.BLUE
     else:
         # If we have a ticket_key, it means the ticket was created
@@ -698,7 +869,7 @@ def get_display_mode_info(is_dry_run, ticket_key):
 
 def display_epic_info(additional_fields, is_dry_run):
     """Display epic linking information if available."""
-    epic_field = SERVICE_OWNERSHIP_EPIC_FIELD
+    epic_field = EPIC_LINK_FIELD
     if epic_field in additional_fields and additional_fields[epic_field]:
         epic = additional_fields[epic_field]
         epic_action = "Would link" if is_dry_run else "Linked"
@@ -738,7 +909,7 @@ def display_ticket_details(key, summary, description, project_key, additional_fi
     if not has_categories:
         print(f"{Fore.YELLOW}  Note: No category selections found for this ticket{Style.RESET_ALL}")
 
-def create_single_ticket(jira_client, project_key, issue_type, key, summary, description, additional_fields, create_mode):
+def create_single_ticket(jira_client, project_key, issue_type, key, summary, description, additional_fields, create_mode, excel_file=None, custom_fields_mapping=None):
     """Create a single Jira ticket or simulate in dry run."""
     # If no project key and key wasn't in the team mapping (due to filtering),
     # this team was likely excluded by processTeams/excludeTeams filters
@@ -750,21 +921,30 @@ def create_single_ticket(jira_client, project_key, issue_type, key, summary, des
             print(f"{Fore.YELLOW}Skipping ticket for '{key}' - no Project field specified{Style.RESET_ALL}")
         return None, key
     
+    # Generate a simulated ticket ID if in dry run mode
+    simulated_ticket_key = None
+    if not create_mode:
+        simulated_ticket_key = simulated_ticket_counter.get_next_ticket_id(project_key)
+    
     # Always display the ticket details for both dry run and creation modes
     display_ticket_details(key, summary, description, project_key, additional_fields, issue_type, 
-                          is_dry_run=not create_mode)
+                          is_dry_run=not create_mode, ticket_key=simulated_ticket_key)
     
-    # If we're in dry run mode, we're done after displaying details
+    # If we're in dry run mode, return the simulated ticket key and summary
     if not create_mode:
-        return None, None
+        # Create a TicketInfo object with the simulated ticket ID and summary
+        ticket_info = TicketInfo(simulated_ticket_key, summary)
+        return ticket_info, None
     
     # Otherwise, create the ticket
     try:
-        new_issue = create_jira_ticket(jira_client, project_key, issue_type, summary, description, **additional_fields)
+        new_issue = create_jira_ticket(jira_client, project_key, issue_type, summary, description, excel_file=excel_file, **additional_fields)
         # Display the creation result with the actual ticket key
         display_ticket_details(key, summary, description, project_key, additional_fields, issue_type, 
                               is_dry_run=False, ticket_key=new_issue.key)
-        return new_issue.key, None
+        # Return a TicketInfo object with the real ticket ID and summary
+        ticket_info = TicketInfo(new_issue.key, summary)
+        return ticket_info, None
     except requests.exceptions.HTTPError as e:
         # HTTP errors are already handled in create_jira_ticket with detailed logging
         # Just return the failure result here
@@ -819,10 +999,9 @@ def group_related_fields(fields):
     
     # List of valid Jira fields (add more as needed)
     valid_jira_fields = [
-        'project', 'summary', 'description', 'issuetype', 
-        'assignee', 'reporter', 'priority', 'labels', 
-        'duedate', 'components', 'fixVersions', 'versions',
-        'environment', 'timetracking', 'security',
+        'assignee', 'components', 'description', 'duedate', 'environment', 'epic link',
+        'fixVersions', 'issuetype', 'labels', 'priority', 'project', 'reporter',
+        'security', 'sprint team', 'summary', 'timetracking', 'versions'
         # Add specific custom fields your Jira instance supports here
     ]
     
@@ -842,7 +1021,9 @@ def group_related_fields(fields):
             # For regular fields, only include known Jira fields in API request
             # This avoids sending invalid fields to Jira
             if field.lower() in [f.lower() for f in valid_jira_fields] or field.startswith('customfield_'):
+                print (f"  Field '{field}' is valid for Jira API")
                 fields_for_api[field] = value
+                print (f"  Added field '{field}' to fields_for_api {fields_for_api}")
             
             # Always keep for display purposes
             grouped_display_fields[field] = value
@@ -897,7 +1078,7 @@ def has_category_selections(fields):
     
     return False
 
-def create_tickets_from_key_value(jira_client, df, default_issue_type, create_mode, team_mapping=None, tab_name=None, priority=None):
+def create_tickets_from_key_value(jira_client, df, default_issue_type, create_mode, team_mapping=None, sheet_name=None, priority=None, custom_fields_mapping=None, excel_file=None):
     """Process transformed key-value data and create tickets."""
     created_tickets = []
     skipped_tickets = []
@@ -920,7 +1101,8 @@ def create_tickets_from_key_value(jira_client, df, default_issue_type, create_mo
         
         # Prepare ticket fields with standard processing
         # This already includes grouping related fields and separating display fields from API fields
-        summary, description, additional_fields, team_project, team_issue_type = prepare_ticket_fields(fields, key, team_mapping, tab_name)
+        summary, description, additional_fields, team_project, team_issue_type = prepare_ticket_fields(fields, key, team_mapping, sheet_name)
+        print("*** FIELDS " + str(additional_fields))
         
         # Use team-specific issue type if available, otherwise use the default
         issue_type = team_issue_type if team_issue_type else default_issue_type
@@ -933,15 +1115,16 @@ def create_tickets_from_key_value(jira_client, df, default_issue_type, create_mo
             additional_fields['priority'] = priority
         
         # Create or simulate ticket creation
-        ticket_key, skipped_key = create_single_ticket(
-            jira_client, project_key, issue_type, key, summary, description, additional_fields, create_mode
+        ticket_info, skipped_key = create_single_ticket(
+            jira_client, project_key, issue_type, key, summary, description, additional_fields, create_mode,
+            excel_file, custom_fields_mapping
         )
         
-        if create_mode:
-            if ticket_key:
-                created_tickets.append(ticket_key)
-        else:
-            # In dry-run mode, only track tickets that would be created (not skipped due to missing Project)
+        if ticket_info:
+            created_tickets.append(ticket_info)
+            
+        if not create_mode:
+            # In dry-run mode, count tickets that would be created (with valid project key)
             if project_key:  # Only count tickets that have a valid project key
                 dry_run_ticket_count += 1
             
@@ -954,9 +1137,49 @@ def create_tickets_from_key_value(jira_client, df, default_issue_type, create_mo
     
     return created_tickets, skipped_tickets
 
-def display_ticket_count_message(create_mode, created_tickets, tab_name=None):
+def assign_ticket(jira_client, issue_key, assignee_name):
+    """Execute the actual assignment API call with error handling.
+    
+    Args:
+        jira_client: The Jira client instance
+        issue_key: The key of the issue to update
+        assignee_name: The username of the assignee to set
+        
+    Returns:
+        bool: True if successful, False if failed
+    """
+    try:
+        print(f"{Fore.CYAN}Setting assignee for {issue_key} to '{assignee_name}'{Style.RESET_ALL}")
+        
+        # Use the standard Jira API method to assign the issue
+        jira_client.assign_issue(issue_key, assignee_name)
+        print(f"{Fore.GREEN}Successfully set assignee for {issue_key} to '{assignee_name}'{Style.RESET_ALL}")
+        return True
+            
+    except requests.exceptions.HTTPError as e:
+        # Get error details from response
+        response = e.response if hasattr(e, 'response') else None
+        status_code = response.status_code if response else "Unknown"
+        
+        print(f"{Fore.RED}HTTP Error ({status_code}) setting assignee for {issue_key}: {str(e)}{Style.RESET_ALL}")
+        
+        if response:
+            try:
+                error_data = response.json()
+                print(f"{Fore.RED}Error details: {error_data}{Style.RESET_ALL}")
+            except ValueError:
+                print(f"{Fore.RED}Raw response: {response.text}{Style.RESET_ALL}")
+        
+        return False
+    except Exception as e:
+        print(f"{Fore.RED}Error setting assignee for {issue_key}: {str(e)}{Style.RESET_ALL}")
+        print(f"{Fore.RED}Error type: {type(e).__name__}{Style.RESET_ALL}")
+        print(f"{Fore.RED}Stack trace: {traceback.format_exc()}{Style.RESET_ALL}")
+        return False
+
+def display_ticket_count_message(create_mode, created_tickets, sheet_name=None):
     """Display a message about the number of tickets created or to be created."""
-    sheet_info = f"for {tab_name}" if tab_name else ""
+    sheet_info = f"for {sheet_name}" if sheet_name else ""
     if not create_mode:
         # In dry run mode, check if any tickets would be created
         ticket_count = len(created_tickets) if created_tickets else 0
@@ -980,13 +1203,13 @@ def display_skipped_messages(create_mode, skipped_count, skipped_tickets):
     if skipped_tickets and create_mode:
         print(f"{Fore.RED}Skipped {len(skipped_tickets)} tickets due to errors.{Style.RESET_ALL}")
 
-def display_summary(create_mode, df, created_tickets, skipped_tickets, tab_name=None):
+def display_summary(create_mode, df, created_tickets, skipped_tickets, sheet_name=None):
     """Display summary of the operation."""
     # Fix for dry run mode - add placeholder ticket IDs if we have a count but no IDs
     if not create_mode and hasattr(df, '_dry_run_ticket_count') and df._dry_run_ticket_count > 0:
         created_tickets = [f"Ticket-{i+1}" for i in range(df._dry_run_ticket_count)]
     elif not create_mode and len(created_tickets) == 0 and not hasattr(df, '_dry_run_ticket_count'):
-        # Ensure we show 0 tickets for tabs with no valid tickets
+        # Ensure we show 0 tickets for sheets with no valid tickets
         created_tickets = []
     
     # Count unique keys in the dataframe
@@ -1002,7 +1225,7 @@ def display_summary(create_mode, df, created_tickets, skipped_tickets, tab_name=
         skipped_count = unique_keys_count - dry_run_count - len(skipped_tickets)
     
     # Display ticket count message
-    display_ticket_count_message(create_mode, created_tickets, tab_name)
+    display_ticket_count_message(create_mode, created_tickets, sheet_name)
     
     # Display messages about skipped tickets
     display_skipped_messages(create_mode, skipped_count, skipped_tickets)
@@ -1016,12 +1239,12 @@ def get_excel_sheets(file_path):
         print(f"{Fore.RED}Error reading Excel sheets: {str(e)}{Style.RESET_ALL}")
         return None
 
-def process_tab(args, file_path, tab_name, jira_client, default_issue_type, team_mapping=None, priority=None):
-    """Process a single tab from the Excel file."""
-    print(f"\n{Fore.CYAN}Processing tab: {tab_name}{Style.RESET_ALL}")
+def process_sheet(args, file_path, sheet_name, jira_client, default_issue_type, team_mapping=None, priority=None, custom_fields_mapping=None):
+    """Process a single sheet from the Excel file."""
+    print(f"\n{Fore.CYAN}Processing sheet: {sheet_name}{Style.RESET_ALL}")
     
-    # Read the Excel tab
-    df = read_excel_file(file_path, tab_name)
+    # Read the Excel sheet
+    df = read_excel_file(file_path, sheet_name)
     if df is None:
         return [], [], 0
     
@@ -1030,15 +1253,16 @@ def process_tab(args, file_path, tab_name, jira_client, default_issue_type, team
         return [], [], 0
     
     # Display data information
-    display_data_info(df, f"{file_path} - {tab_name}")
+    display_data_info(df, f"{file_path} - {sheet_name}")
     
     # Create tickets, optionally using team mapping data
     created_tickets, skipped_tickets = create_tickets_from_key_value(
-        jira_client, df, default_issue_type, args.create, team_mapping, tab_name, priority
+        jira_client, df, default_issue_type, args.create, team_mapping, sheet_name, priority, 
+        custom_fields_mapping, file_path
     )
     
-    # Display summary for this tab
-    display_summary(args.create, df, created_tickets, skipped_tickets, tab_name)
+    # Display summary for this sheet
+    display_summary(args.create, df, created_tickets, skipped_tickets, sheet_name)
     
     # Return dry run count for overall summary
     dry_run_count = getattr(df, '_dry_run_ticket_count', 0) if not args.create else 0
@@ -1058,12 +1282,12 @@ def add_to_team_field(team_data, field, value):
     return team_data
 
 def create_team_mapping(teams_df):
-    """Create a mapping of team information from the Teams tab."""
+    """Create a mapping of team information from the Teams sheet."""
     team_mapping = {}
     
     # Validate required columns exist
     if not all(col in teams_df.columns for col in ['Key', 'Field', 'Value']):
-        print(f"{Fore.YELLOW}Warning: Teams tab does not have required columns (Key, Field, Value){Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Warning: Teams sheet does not have required columns (Key, Field, Value){Style.RESET_ALL}")
         return team_mapping
     
     # Group data by key (team name)
@@ -1081,14 +1305,14 @@ def create_team_mapping(teams_df):
     
     return team_mapping
 
-def process_teams_tab(excel_file, available_sheets):
-    """Process the Teams tab from the Excel file."""
-    # Check if Teams tab exists
+def process_teams_sheet(excel_file, available_sheets):
+    """Process the Teams sheet from the Excel file."""
+    # Check if Teams sheet exists
     if "Teams" not in available_sheets:
-        print(f"{Fore.RED}Error: 'Teams' tab not found in the Excel file. Available tabs: {', '.join(available_sheets)}{Style.RESET_ALL}")
+        print(f"{Fore.RED}Error: 'Teams' sheet not found in the Excel file. Available sheets: {', '.join(available_sheets)}{Style.RESET_ALL}")
         return None
     
-    # Read the Teams tab
+    # Read the Teams sheet
     teams_df = read_excel_file(excel_file, "Teams")
     if teams_df is None:
         return None
@@ -1097,12 +1321,12 @@ def process_teams_tab(excel_file, available_sheets):
     if not validate_data(teams_df):
         return None
     
-    # Create team mapping from Teams tab
+    # Create team mapping from Teams sheet
     team_mapping = create_team_mapping(teams_df)
     print(f"\n{Fore.CYAN}Created team mapping with {len(team_mapping)} teams{Style.RESET_ALL}")
     
     # Display data information for Teams (just for information)
-    print(f"\n{Fore.CYAN}Teams information (for reference only - no tickets will be created from this tab):{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}Teams information (for reference only - no tickets will be created from this sheet):{Style.RESET_ALL}")
     display_data_info(teams_df, excel_file)
     
     return team_mapping
@@ -1204,11 +1428,16 @@ def filter_team_mapping(team_mapping, args):
     
     return filtered_mapping
 
-def process_all_tabs(args, file_path, available_sheets, jira_client, default_issue_type, team_mapping, priority=None):
-    """Process all the tabs from the Excel file."""
+def process_all_sheets(args, file_path, available_sheets, jira_client, default_issue_type, team_mapping, priority=None):
+    """Process all the sheets from the Excel file."""
     all_created_tickets = []
     all_skipped_tickets = []
     total_dry_run_count = 0
+    
+    # Load custom fields mapping if the CustomFields sheet exists
+    custom_fields_mapping = None
+    if CUSTOM_FIELDS_SHEET in available_sheets:
+        custom_fields_mapping = read_custom_fields_mapping(file_path)
     
     # Filter teams based on arguments
     filtered_team_mapping = filter_team_mapping(team_mapping, args)
@@ -1217,41 +1446,98 @@ def process_all_tabs(args, file_path, available_sheets, jira_client, default_iss
     display_team_projects(filtered_team_mapping)
     display_team_issue_types(filtered_team_mapping)
     
-    for tab_name in TAB_NAMES:
-        if tab_name in available_sheets:
-            created, skipped, dry_run_count = process_tab(
-                args, file_path, tab_name, jira_client, default_issue_type, filtered_team_mapping, priority
+    for sheet_name in SHEET_NAMES:
+        if sheet_name in available_sheets:
+            created, skipped, dry_run_count = process_sheet(
+                args, file_path, sheet_name, jira_client, default_issue_type, filtered_team_mapping, priority, 
+                custom_fields_mapping
             )
             all_created_tickets.extend(created)
             all_skipped_tickets.extend(skipped)
             total_dry_run_count += dry_run_count
         else:
-            print(f"{Fore.YELLOW}Warning: Tab '{tab_name}' not found in the Excel file, skipping.{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Warning: Sheet '{sheet_name}' not found in the Excel file, skipping.{Style.RESET_ALL}")
     
     return all_created_tickets, all_skipped_tickets, total_dry_run_count
+
+def display_filter_info(args):
+    """Generate filter info string based on arguments."""
+    if args and args.processTeams:
+        return " (filtered to include only specified teams)"
+    elif args and args.excludeTeams:
+        return " (with excluded teams filtered out)"
+    return ""
+
+def display_dry_run_summary(total_dry_run_count, all_created_tickets, issue_type, filter_info):
+    """Display summary for dry run mode."""
+    ticket_count = total_dry_run_count if total_dry_run_count > 0 else len(all_created_tickets)
+    print(f"{Fore.YELLOW}[DRY RUN] Would have created a total of {ticket_count} tickets in Jira across all sheets as issue type '{issue_type}'{filter_info}.{Style.RESET_ALL}")
+    
+    # If we have simulated tickets, display them in alphabetical sorted order
+    if all_created_tickets:
+        # Sort tickets alphabetically by ticket ID
+        sorted_tickets = sorted(all_created_tickets, key=lambda t: t.ticket_id)
+        
+        print(f"\n{Fore.CYAN}=== SIMULATED TICKETS (Alphabetical) ==={Style.RESET_ALL}")
+        for i, ticket in enumerate(sorted_tickets, 1):
+            print(f"{Fore.BLUE}{i}. {ticket.ticket_id}: {ticket.summary}{Style.RESET_ALL}")
+        
+        print(f"\n{Fore.CYAN}Simulated tickets for copy-paste:{Style.RESET_ALL}")
+        ticket_ids = [t.ticket_id for t in sorted_tickets]
+        print(f"{Fore.BLUE}{','.join(ticket_ids)}{Style.RESET_ALL}")
+
+def display_created_tickets(all_created_tickets):
+    """Display detailed list of created tickets in alphabetical order."""
+    # Sort tickets alphabetically by ticket ID
+    sorted_tickets = sorted(all_created_tickets, key=lambda t: t.ticket_id)
+    
+    print(f"\n{Fore.CYAN}=== CREATED TICKETS (Alphabetical) ==={Style.RESET_ALL}")
+    for i, ticket in enumerate(sorted_tickets, 1):
+        print(f"{Fore.GREEN}{i}. {ticket.ticket_id}: {ticket.summary}{Style.RESET_ALL}")
+    
+    # Print tickets in comma-separated format for easy copy-pasting
+    print(f"\n{Fore.CYAN}Tickets for copy-paste:{Style.RESET_ALL}")
+    ticket_ids = [t.ticket_id for t in sorted_tickets]
+    print(f"{Fore.GREEN}{','.join(ticket_ids)}{Style.RESET_ALL}")
+    
+    # Print suggestion for using the tickets in other tools
+    if sorted_tickets:
+        first_ticket_id = sorted_tickets[0].ticket_id
+        print(f"\n{Fore.CYAN}Tip: You can use these tickets in other JiraTools scripts:{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}  e.g., python epicStatus.py {first_ticket_id}{Style.RESET_ALL}")
+        if len(sorted_tickets) > 1:
+            print(f"{Fore.CYAN}  or python jira_assign.py {first_ticket_id} username{Style.RESET_ALL}")
+
+def display_skipped_tickets(all_skipped_tickets):
+    """Display list of skipped tickets in alphabetical order."""
+    if not all_skipped_tickets:
+        return
+    
+    # Sort skipped tickets alphabetically    
+    sorted_skipped = sorted(all_skipped_tickets)
+    
+    print(f"{Fore.RED}Skipped a total of {len(sorted_skipped)} tickets due to errors.{Style.RESET_ALL}")
+    print(f"\n{Fore.RED}=== SKIPPED TICKETS (Alphabetical) ==={Style.RESET_ALL}")
+    for i, team in enumerate(sorted_skipped, 1):
+        print(f"{Fore.RED}{i}. {team}{Style.RESET_ALL}")
 
 def display_overall_summary(create_mode, all_created_tickets, all_skipped_tickets, total_dry_run_count, issue_type, args=None):
     """Display the overall summary of the operation."""
     print(f"\n{Fore.CYAN}=== OVERALL SUMMARY ==={Style.RESET_ALL}")
     
-    # Add team filter information if applicable
-    filter_info = ""
-    if args and args.processTeams:
-        filter_info = " (filtered to include only specified teams)"
-    elif args and args.excludeTeams:
-        filter_info = " (with excluded teams filtered out)"
+    # Generate filter info string
+    filter_info = display_filter_info(args)
     
     if not create_mode:
-        ticket_count = total_dry_run_count if total_dry_run_count > 0 else len(all_created_tickets)
-        print(f"{Fore.YELLOW}[DRY RUN] Would have created a total of {ticket_count} tickets in Jira across all sheets as issue type '{issue_type}'{filter_info}.{Style.RESET_ALL}")
+        display_dry_run_summary(total_dry_run_count, all_created_tickets, issue_type, filter_info)
     else:
         if all_created_tickets:
             print(f"{Fore.GREEN}Created a total of {len(all_created_tickets)} tickets across all sheets as issue type '{issue_type}'{filter_info}.{Style.RESET_ALL}")
+            display_created_tickets(all_created_tickets)
         else:
             print(f"{Fore.YELLOW}No tickets were created across all sheets{filter_info}.{Style.RESET_ALL}")
             
-        if all_skipped_tickets:
-            print(f"{Fore.RED}Skipped a total of {len(all_skipped_tickets)} tickets due to errors.{Style.RESET_ALL}")
+        display_skipped_tickets(all_skipped_tickets)
 
 def main():
     # Initialize colorama
@@ -1292,8 +1578,8 @@ def main():
     else:
         print(f"{Fore.CYAN}No priority specified in Config sheet, using Jira default{Style.RESET_ALL}")
     
-    # Process Teams tab
-    team_mapping = process_teams_tab(args.excel_file, available_sheets)
+    # Process Teams sheet
+    team_mapping = process_teams_sheet(args.excel_file, available_sheets)
     if team_mapping is None:
         return
     
@@ -1317,11 +1603,11 @@ def main():
         if nonexistent_teams:
             print(f"{Fore.YELLOW}Warning: Some excluded teams not found in Teams sheet: {', '.join(nonexistent_teams)}{Style.RESET_ALL}")
     
-    # Count available tabs for processing
-    available_tab_count = sum(1 for tab in TAB_NAMES if tab in available_sheets)
+    # Count available sheets for processing
+    available_sheet_count = sum(1 for sheet in SHEET_NAMES if sheet in available_sheets)
     
     # Confirm operation with user
-    issue_type = confirm_operation(args, available_tab_count, issue_type)
+    issue_type = confirm_operation(args, available_sheet_count, issue_type)
     if not issue_type:
         return
     
@@ -1334,8 +1620,8 @@ def main():
         print(f"{Fore.RED}Error connecting to Jira: {str(e)}{Style.RESET_ALL}")
         return
     
-    # Process all tabs
-    all_created_tickets, all_skipped_tickets, total_dry_run_count = process_all_tabs(
+    # Process all sheets
+    all_created_tickets, all_skipped_tickets, total_dry_run_count = process_all_sheets(
         args, args.excel_file, available_sheets, jira_client, issue_type, team_mapping, priority
     )
     

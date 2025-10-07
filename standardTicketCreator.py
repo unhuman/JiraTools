@@ -176,7 +176,7 @@ def transform_to_key_value_format(df):
         key_rows = df[df[first_col_name] == key_value]
         result_df = process_key_rows(result_df, key_rows, key_value, df.columns[1:])
     
-    print(f"Transformed data from {len(df)} rows to {len(result_df)} key-value pairs")
+    # print(f"Transformed data from {len(df)} rows to {len(result_df)} key-value pairs")
     
     # Check if the transformation resulted in an empty DataFrame or missing required columns
     if result_df.empty:
@@ -222,7 +222,6 @@ def read_excel_file(file_path, sheet_name):
     try:
         # Read the Excel file
         df = pd.read_excel(file_path, sheet_name=sheet_name)
-        print(f"Reading from sheet: {sheet_name}")
         
         # Check if the sheet is empty
         if df.empty:
@@ -1021,9 +1020,7 @@ def group_related_fields(fields):
             # For regular fields, only include known Jira fields in API request
             # This avoids sending invalid fields to Jira
             if field.lower() in [f.lower() for f in valid_jira_fields] or field.startswith('customfield_'):
-                print (f"  Field '{field}' is valid for Jira API")
                 fields_for_api[field] = value
-                print (f"  Added field '{field}' to fields_for_api {fields_for_api}")
             
             # Always keep for display purposes
             grouped_display_fields[field] = value
@@ -1102,7 +1099,6 @@ def create_tickets_from_key_value(jira_client, df, default_issue_type, create_mo
         # Prepare ticket fields with standard processing
         # This already includes grouping related fields and separating display fields from API fields
         summary, description, additional_fields, team_project, team_issue_type = prepare_ticket_fields(fields, key, team_mapping, sheet_name)
-        print("*** FIELDS " + str(additional_fields))
         
         # Use team-specific issue type if available, otherwise use the default
         issue_type = team_issue_type if team_issue_type else default_issue_type
@@ -1190,7 +1186,9 @@ def display_ticket_count_message(create_mode, created_tickets, sheet_name=None):
     else:
         # In create mode, check if any tickets were actually created
         if created_tickets:
-            print(f"\n{Fore.GREEN}Created {len(created_tickets)} tickets {sheet_info}: {', '.join(created_tickets)}{Style.RESET_ALL}")
+            # Extract ticket IDs from TicketInfo objects for display
+            ticket_ids = [ticket.ticket_id for ticket in created_tickets]
+            print(f"\n{Fore.GREEN}Created {len(created_tickets)} tickets {sheet_info}: {', '.join(ticket_ids)}{Style.RESET_ALL}")
         else:
             print(f"\n{Fore.YELLOW}No tickets were created {sheet_info}.{Style.RESET_ALL}")
 
@@ -1207,7 +1205,8 @@ def display_summary(create_mode, df, created_tickets, skipped_tickets, sheet_nam
     """Display summary of the operation."""
     # Fix for dry run mode - add placeholder ticket IDs if we have a count but no IDs
     if not create_mode and hasattr(df, '_dry_run_ticket_count') and df._dry_run_ticket_count > 0:
-        created_tickets = [f"Ticket-{i+1}" for i in range(df._dry_run_ticket_count)]
+        # Create placeholder TicketInfo objects with generic summaries
+        created_tickets = [TicketInfo(f"Ticket-{i+1}", "Generated placeholder ticket") for i in range(df._dry_run_ticket_count)]
     elif not create_mode and len(created_tickets) == 0 and not hasattr(df, '_dry_run_ticket_count'):
         # Ensure we show 0 tickets for sheets with no valid tickets
         created_tickets = []
@@ -1253,7 +1252,7 @@ def process_sheet(args, file_path, sheet_name, jira_client, default_issue_type, 
         return [], [], 0
     
     # Display data information
-    display_data_info(df, f"{file_path} - {sheet_name}")
+    # display_data_info(df, f"{file_path} - {sheet_name}")
     
     # Create tickets, optionally using team mapping data
     created_tickets, skipped_tickets = create_tickets_from_key_value(
@@ -1327,7 +1326,7 @@ def process_teams_sheet(excel_file, available_sheets):
     
     # Display data information for Teams (just for information)
     print(f"\n{Fore.CYAN}Teams information (for reference only - no tickets will be created from this sheet):{Style.RESET_ALL}")
-    display_data_info(teams_df, excel_file)
+    # display_data_info(teams_df, excel_file)
     
     return team_mapping
 
@@ -1343,14 +1342,6 @@ def display_team_projects(team_mapping):
                 projects[project] = []
             projects[project].append(team_name)
     
-    # Display the information if any team has a specific Project value
-    if projects:
-        print(f"\n{Fore.CYAN}Team-specific Projects (used as project keys):{Style.RESET_ALL}")
-        for project, teams in projects.items():
-            print(f"  {Fore.YELLOW}{project}{Style.RESET_ALL}: {', '.join(teams)}")
-    else:
-        print(f"\n{Fore.YELLOW}No team-specific Project values found. Tickets will be skipped.{Style.RESET_ALL}")
-
 def display_team_issue_types(team_mapping):
     """Display team-specific Issue Type values if available."""
     issue_types = {}
@@ -1363,14 +1354,6 @@ def display_team_issue_types(team_mapping):
                 issue_types[issue_type] = []
             issue_types[issue_type].append(team_name)
     
-    # Display the information if any team has a specific Issue Type value
-    if issue_types:
-        print(f"\n{Fore.CYAN}Team-specific Issue Types:{Style.RESET_ALL}")
-        for issue_type, teams in issue_types.items():
-            print(f"  {Fore.YELLOW}{issue_type}{Style.RESET_ALL}: {', '.join(teams)}")
-    else:
-        print(f"\n{Fore.YELLOW}No team-specific Issue Types found. Default issue type will be used.{Style.RESET_ALL}")
-
 def filter_team_mapping(team_mapping, args):
     """Filter team mapping based on processTeams or excludeTeams arguments."""
     filtered_mapping = team_mapping.copy()
@@ -1482,9 +1465,9 @@ def display_dry_run_summary(total_dry_run_count, all_created_tickets, issue_type
         for i, ticket in enumerate(sorted_tickets, 1):
             print(f"{Fore.BLUE}{i}. {ticket.ticket_id}: {ticket.summary}{Style.RESET_ALL}")
         
-        print(f"\n{Fore.CYAN}Simulated tickets for copy-paste:{Style.RESET_ALL}")
-        ticket_ids = [t.ticket_id for t in sorted_tickets]
-        print(f"{Fore.BLUE}{','.join(ticket_ids)}{Style.RESET_ALL}")
+        # print(f"\n{Fore.CYAN}Simulated tickets for copy-paste:{Style.RESET_ALL}")
+        # ticket_ids = [t.ticket_id for t in sorted_tickets]
+        # print(f"{Fore.BLUE}{','.join(ticket_ids)}{Style.RESET_ALL}")
 
 def display_created_tickets(all_created_tickets):
     """Display detailed list of created tickets in alphabetical order."""
@@ -1496,9 +1479,9 @@ def display_created_tickets(all_created_tickets):
         print(f"{Fore.GREEN}{i}. {ticket.ticket_id}: {ticket.summary}{Style.RESET_ALL}")
     
     # Print tickets in comma-separated format for easy copy-pasting
-    print(f"\n{Fore.CYAN}Tickets for copy-paste:{Style.RESET_ALL}")
-    ticket_ids = [t.ticket_id for t in sorted_tickets]
-    print(f"{Fore.GREEN}{','.join(ticket_ids)}{Style.RESET_ALL}")
+    # print(f"\n{Fore.CYAN}Tickets for copy-paste:{Style.RESET_ALL}")
+    # ticket_ids = [t.ticket_id for t in sorted_tickets]
+    # print(f"{Fore.GREEN}{','.join(ticket_ids)}{Style.RESET_ALL}")
     
     # Print suggestion for using the tickets in other tools
     if sorted_tickets:

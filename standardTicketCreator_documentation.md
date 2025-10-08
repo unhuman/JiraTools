@@ -126,11 +126,11 @@ Your Excel file should have the following sheets and formats:
 | Priority | 4-Medium |
 
 #### Teams Sheet
-| Sprint Team | Assignee | Project | Epic Link | Issue Type | Sprint | Sprint Name |
-|-------------|----------|---------|----------|------------|--------|-------------|
-| TeamA | jdoe | RND | RND-12345 | Story | 29311 | CRM Planning |
-| TeamB | msmith | DEV | DEV-56789 | Task | | |
-| TeamC | rjones | QA | QA-34567 | Bug | 29312 | Platform Sprint 5 |
+| Sprint Team | Assignee | Project | Epic Link | Issue Type | Sprint | Sprint Name | Component |
+|-------------|----------|---------|----------|------------|--------|-------------|-----------|
+| TeamA | jdoe | RND | RND-12345 | Story | 29311 | CRM Planning | Backend |
+| TeamB | msmith | DEV | DEV-56789 | Task | | | Frontend |
+| TeamC | rjones | QA | QA-34567 | Bug | 29312 | Platform Sprint 5 | |
 
 #### Ownership Sheet
 | Team | L1 | L2 | L3 |
@@ -210,14 +210,17 @@ The Teams sheet contains configuration for each team with the following columns:
 - **Issue Type**: (Optional) The Jira issue type for tickets created for this team (e.g., Story, Task, Bug)
 - **Sprint**: (Optional) The numeric Sprint ID to assign tickets to for this team
 - **Sprint Name**: (Optional) The human-readable sprint name for convenience/information only - not used by the script
+- **Component**: (Optional) The Jira component to assign tickets to for this team
 
-Note: If Issue Type is not specified in the Teams sheet, it will use the default "Task" value or the command line parameter (-i) if provided. The priority is specified in the Config sheet with key "Priority". The Sprint field is optional and when present, the specified numeric Sprint ID will be assigned to tickets created for that team. Sprint IDs can be found in Jira by looking at the sprint details or URL when viewing a sprint. The Sprint Name column is provided for convenience and reference only - the script uses the numeric Sprint field for actual sprint assignment.
+Note: If Issue Type is not specified in the Teams sheet, it will use the default "Task" value or the command line parameter (-i) if provided. The priority is specified in the Config sheet with key "Priority". The Sprint field is optional and when present, the specified numeric Sprint ID will be assigned to tickets created for that team. Sprint IDs can be found in Jira by looking at the sprint details or URL when viewing a sprint. The Sprint Name column is provided for convenience and reference only - the script uses the numeric Sprint field for actual sprint assignment. The Component field is optional and when present, the specified component will be assigned to tickets created for that team.
 
 Example format:
 
-| Sprint Team | Assignee | Project | Epic Link | Issue Type | Sprint | Sprint Name |
-|-------------|----------|---------|----------|------------|--------|-------------|
-| TeamA | jdoe | RND | RND-12345 | Story | 29311 | CRM Planning |
+| Sprint Team | Assignee | Project | Epic Link | Issue Type | Sprint | Sprint Name | Component |
+|-------------|----------|---------|----------|------------|--------|-------------|-----------|
+| TeamA | jdoe | RND | RND-12345 | Story | 29311 | CRM Planning | Backend |
+| TeamB | msmith | DEV | DEV-56789 | Task | | | Frontend |
+| TeamC | rjones | QA | QA-34567 | Bug | 29312 | Platform Sprint 5 | |
 | TeamB | msmith | DEV | DEV-56789 | Task | | |
 | TeamC | rjones | QA | QA-34567 | Bug | 29312 | Platform Sprint 5 |
 | TeamC | rjones | QA | QA-34567 | Bug | 29312 |
@@ -233,6 +236,7 @@ Each team should have a unique name in the Sprint Team column as this is used to
 5. **Assignee Names**: The Assignee column should contain valid Jira usernames
 6. **Sprint Field**: The Sprint column is optional; when provided, tickets will be assigned to the specified sprint using the numeric Sprint ID (e.g., 29311, not "Sprint 42")
 7. **Sprint Name Column**: The Sprint Name column is for convenience/reference only and is not processed by the script - use the Sprint column for actual sprint assignment
+8. **Component Field**: The Component column is optional; when provided, tickets will be assigned to the specified component name (e.g., "Backend", "Frontend")
 
 ### Special Field Requirements
 
@@ -258,6 +262,18 @@ The Sprint Name column is optional and serves as a convenience/reference field:
 4. **Not Required**: This column can be left empty without affecting ticket creation
 
 **Important**: Always use the numeric **Sprint** column for actual sprint assignment, not the Sprint Name column.
+
+#### Component Field
+The Component field is a standard Jira field with specific requirements:
+
+1. **Must match existing components**: Use component names that exist in the target Jira project (e.g., "Backend", "Frontend", "API")
+2. **Single component only**: Each team can specify one component - if multiple components are needed, use a comma-separated list
+3. **Case sensitive**: Component names are case-sensitive and must match exactly as defined in Jira
+4. **Project specific**: Components must exist in the specific Jira project where the ticket will be created
+5. **Finding components**: You can find available components by:
+   - Looking at existing tickets in the project
+   - Checking the project settings in Jira
+   - Using the Jira API to list project components
 
 #### Epic Link Field
 Epic Link is handled automatically for most Jira instances, but may require CustomFields mapping in some configurations.

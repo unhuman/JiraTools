@@ -83,6 +83,7 @@ def parse_arguments():
     parser.epilog = ("Note: Project key is determined by the 'Project' field in the Teams sheet.\n"
                    "Issue type is determined by the 'Issue Type' field in the Teams sheet.\n"
                    "Sprint is determined by the 'Sprint' field in the Teams sheet (optional).\n"
+                   "Component is determined by the 'Component' field in the Teams sheet (optional).\n"
                    "Priority is read from the 'Config' sheet with key 'Priority'.\n"
                    "Each ticket will be linked to the 'Epic Link' specified in the Teams sheet.\n"
                    "Use --processTeams to specify which teams to process or --excludeTeams to exclude specific teams.")
@@ -385,6 +386,7 @@ def process_fields_for_jira(fields, issue_dict, custom_fields_mapping=None):
     standard_fields = {
         'reporter': 'name',
         'priority': 'name',
+        'component': 'name',  # Single component name -> components field
         'components': 'name',  # List of component names
         'labels': None,  # Simple list
         'duedate': None,  # String in format 'YYYY-MM-DD'
@@ -434,16 +436,22 @@ def process_fields_for_jira(fields, issue_dict, custom_fields_mapping=None):
 
 def add_standard_field(issue_dict, field, value, format_type):
     """Format and add a standard field to the issue dictionary."""
+    # Map singular 'component' to plural 'components' for Jira API
+    api_field = 'components' if field.lower() == 'component' else field
+    
     if format_type == 'name':
         if isinstance(value, list):
             # Handle list of values (components, fixVersions, etc.)
-            issue_dict[field] = [{'name': item} for item in value]
+            issue_dict[api_field] = [{'name': item} for item in value]
         else:
-            # Handle single value
-            issue_dict[field] = {'name': value}
+            # Handle single value - for component, wrap in a list since Jira expects components as array
+            if field.lower() == 'component':
+                issue_dict[api_field] = [{'name': value}]
+            else:
+                issue_dict[api_field] = {'name': value}
     else:
         # Fields that don't need special formatting (labels, duedate, etc.)
-        issue_dict[field] = value
+        issue_dict[api_field] = value
 
 def log_issue_fields(issue_dict):
     """Log the fields being sent to Jira API."""
@@ -1006,7 +1014,7 @@ def group_related_fields(fields):
     
     # List of valid Jira fields (add more as needed)
     valid_jira_fields = [
-        'assignee', 'components', 'description', 'duedate', 'environment', 'epic link',
+        'assignee', 'component', 'components', 'description', 'duedate', 'environment', 'epic link',
         'fixVersions', 'issuetype', 'labels', 'priority', 'project', 'reporter',
         'security', 'sprint team', 'sprint', 'summary', 'timetracking', 'versions'
         # Add specific custom fields your Jira instance supports here

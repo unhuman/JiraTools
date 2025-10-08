@@ -2,6 +2,14 @@
 # Runs in dry-run mode by default - use -c/--create to actually create tickets
 # pip install colorama | jira | pandas | openpyxl
 #
+# Teams Sheet Fields:
+# - Sprint Team: Team identifier (required)
+# - Assignee: Person to assign tickets to (optional)
+# - Project: Jira project key (required)
+# - Epic Link: Parent epic key to link tickets to (optional)
+# - Issue Type: Jira issue type override (optional)
+# - Sprint: Sprint to assign tickets to (optional)
+#
 # Custom Fields Configuration:
 # - Define custom fields in the "CustomFields" sheet with columns:
 #   1. Field Name: Name of the field in Excel (e.g., "Sprint Team", "Epic Link")
@@ -53,6 +61,7 @@ SHEET_NAMES = ["Ownership", "Quality", "Security", "Reliability"]
 ASSIGNEE_FIELD = "Assignee"
 PROJECT_FIELD = "Project"
 EPIC_LINK_FIELD = "Epic Link"
+SPRINT_FIELD = "Sprint"
 EPIC_LINK_TYPE = "Epic-Story Link"  # The link type used to connect stories to epics
 CONFIG_SHEET = "Config"
 CUSTOM_FIELDS_SHEET = "CustomFields"  # Sheet for custom field mappings
@@ -73,6 +82,7 @@ def parse_arguments():
     # Note in help text about using Project field for project key
     parser.epilog = ("Note: Project key is determined by the 'Project' field in the Teams sheet.\n"
                    "Issue type is determined by the 'Issue Type' field in the Teams sheet.\n"
+                   "Sprint is determined by the 'Sprint' field in the Teams sheet (optional).\n"
                    "Priority is read from the 'Config' sheet with key 'Priority'.\n"
                    "Each ticket will be linked to the 'Epic Link' specified in the Teams sheet.\n"
                    "Use --processTeams to specify which teams to process or --excludeTeams to exclude specific teams.")
@@ -387,13 +397,11 @@ def process_fields_for_jira(fields, issue_dict, custom_fields_mapping=None):
         # Skip empty, NaN values, or special fields not meant for Jira API
         if not value or str(value).lower() == 'nan' or field == 'Project':
             continue
-        
+
         # Skip assignee field as it's handled separately after ticket creation
         if field.lower() == 'assignee':
             print(f"{Fore.YELLOW}Skipping 'assignee' field during initial ticket creation - will be set afterwards{Style.RESET_ALL}")
-            continue
-            
-        # Handle standard fields with special formatting requirements
+            continue        # Handle standard fields with special formatting requirements
         field_lower = field.lower()
         if field_lower in standard_fields:
             format_type = standard_fields[field_lower]
@@ -1000,7 +1008,7 @@ def group_related_fields(fields):
     valid_jira_fields = [
         'assignee', 'components', 'description', 'duedate', 'environment', 'epic link',
         'fixVersions', 'issuetype', 'labels', 'priority', 'project', 'reporter',
-        'security', 'sprint team', 'summary', 'timetracking', 'versions'
+        'security', 'sprint team', 'sprint', 'summary', 'timetracking', 'versions'
         # Add specific custom fields your Jira instance supports here
     ]
     
@@ -1465,9 +1473,9 @@ def display_dry_run_summary(total_dry_run_count, all_created_tickets, issue_type
         for i, ticket in enumerate(sorted_tickets, 1):
             print(f"{Fore.BLUE}{i}. {ticket.ticket_id}: {ticket.summary}{Style.RESET_ALL}")
         
-        # print(f"\n{Fore.CYAN}Simulated tickets for copy-paste:{Style.RESET_ALL}")
-        # ticket_ids = [t.ticket_id for t in sorted_tickets]
-        # print(f"{Fore.BLUE}{','.join(ticket_ids)}{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}Simulated tickets for copy-paste:{Style.RESET_ALL}")
+        ticket_ids = [t.ticket_id for t in sorted_tickets]
+        print(f"{Fore.BLUE}{','.join(ticket_ids)}{Style.RESET_ALL}")
 
 def display_created_tickets(all_created_tickets):
     """Display detailed list of created tickets in alphabetical order."""

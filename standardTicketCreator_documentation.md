@@ -126,11 +126,11 @@ Your Excel file should have the following sheets and formats:
 | Priority | 4-Medium |
 
 #### Teams Sheet
-| Sprint Team | Assignee | Project | Epic Link | Issue Type |
-|-------------|----------|---------|----------|------------|
-| TeamA | jdoe | RND | RND-12345 | Story |
-| TeamB | msmith | DEV | DEV-56789 | Task |
-| TeamC | rjones | QA | QA-34567 | Bug |
+| Sprint Team | Assignee | Project | Epic Link | Issue Type | Sprint | Sprint Name |
+|-------------|----------|---------|----------|------------|--------|-------------|
+| TeamA | jdoe | RND | RND-12345 | Story | 29311 | CRM Planning |
+| TeamB | msmith | DEV | DEV-56789 | Task | | |
+| TeamC | rjones | QA | QA-34567 | Bug | 29312 | Platform Sprint 5 |
 
 #### Ownership Sheet
 | Team | L1 | L2 | L3 |
@@ -146,9 +146,10 @@ Your Excel file should have the following sheets and formats:
 #### CustomFields Sheet (Optional)
 | Field Name | Custom Field ID | Data Wrapper |
 |------------|----------------|--------------|
-| Sprint Team | customfield_10123 | value |
+| Sprint Team | customfield_12900 | value |
+| Epic Link | customfield_10506 | none |
+| Sprint | customfield_10505 | none |
 | Story Points | customfield_10002 | none |
-| Epic Link | customfield_10100 | value |
 
 The **Data Wrapper** column controls how field values are formatted when sent to the Jira API:
 - When set to "value": The value is wrapped like `{"value": "field_value"}`
@@ -207,16 +208,19 @@ The Teams sheet contains configuration for each team with the following columns:
 - **Project**: The Jira project key for ticket creation
 - **Epic Link**: The parent epic key to link created tickets to
 - **Issue Type**: (Optional) The Jira issue type for tickets created for this team (e.g., Story, Task, Bug)
+- **Sprint**: (Optional) The numeric Sprint ID to assign tickets to for this team
+- **Sprint Name**: (Optional) The human-readable sprint name for convenience/information only - not used by the script
 
-Note: If Issue Type is not specified in the Teams sheet, it will use the default "Task" value or the command line parameter (-i) if provided. The priority is specified in the Config sheet with key "Priority".
+Note: If Issue Type is not specified in the Teams sheet, it will use the default "Task" value or the command line parameter (-i) if provided. The priority is specified in the Config sheet with key "Priority". The Sprint field is optional and when present, the specified numeric Sprint ID will be assigned to tickets created for that team. Sprint IDs can be found in Jira by looking at the sprint details or URL when viewing a sprint. The Sprint Name column is provided for convenience and reference only - the script uses the numeric Sprint field for actual sprint assignment.
 
 Example format:
 
-| Sprint Team | Assignee | Project | Epic Link | Issue Type |
-|-------------|----------|---------|----------|------------|
-| TeamA | jdoe | RND | RND-12345 | Story |
-| TeamB | msmith | DEV | DEV-56789 | Task |
-| TeamC | rjones | QA | QA-34567 | Bug |
+| Sprint Team | Assignee | Project | Epic Link | Issue Type | Sprint | Sprint Name |
+|-------------|----------|---------|----------|------------|--------|-------------|
+| TeamA | jdoe | RND | RND-12345 | Story | 29311 | CRM Planning |
+| TeamB | msmith | DEV | DEV-56789 | Task | | |
+| TeamC | rjones | QA | QA-34567 | Bug | 29312 | Platform Sprint 5 |
+| TeamC | rjones | QA | QA-34567 | Bug | 29312 |
 
 Each team should have a unique name in the Sprint Team column as this is used to match with team names in other tabs.
 
@@ -226,7 +230,37 @@ Each team should have a unique name in the Sprint Team column as this is used to
 2. **Valid Project Keys**: The Project column must contain valid Jira project keys
 3. **Epic Format**: The Epic Link column should contain valid Jira epic issue keys (e.g., PRJ-1234)
 4. **Issue Types**: The Issue Type column should contain valid Jira issue types (e.g., Story, Task, Bug)
-4. **Assignee Names**: The Assignee column should contain valid Jira usernames
+5. **Assignee Names**: The Assignee column should contain valid Jira usernames
+6. **Sprint Field**: The Sprint column is optional; when provided, tickets will be assigned to the specified sprint using the numeric Sprint ID (e.g., 29311, not "Sprint 42")
+7. **Sprint Name Column**: The Sprint Name column is for convenience/reference only and is not processed by the script - use the Sprint column for actual sprint assignment
+
+### Special Field Requirements
+
+#### Sprint Field
+The Sprint field has specific requirements:
+
+1. **Must be numeric**: Use the Sprint ID (e.g., 29311) not the sprint name (e.g., "Sprint 42")
+2. **Requires CustomFields mapping**: Add Sprint to your CustomFields sheet with:
+   - Field Name: `Sprint`
+   - Custom Field ID: The Sprint custom field ID from your Jira instance (e.g., `customfield_10505`)
+   - Data Wrapper: `none`
+3. **Finding Sprint IDs**: You can find Sprint IDs by:
+   - Looking at the sprint URL in Jira (the number in the URL)
+   - Using the Jira API to list sprints
+   - Checking sprint details in your Jira board
+
+#### Sprint Name Column
+The Sprint Name column is optional and serves as a convenience/reference field:
+
+1. **Information Only**: This column is not processed by the script and has no functional impact
+2. **Human Readable**: Use this to store readable sprint names (e.g., "CRM Planning", "Platform Sprint 5") 
+3. **Reference Purpose**: Helps users understand which sprint the numeric Sprint ID refers to
+4. **Not Required**: This column can be left empty without affecting ticket creation
+
+**Important**: Always use the numeric **Sprint** column for actual sprint assignment, not the Sprint Name column.
+
+#### Epic Link Field
+Epic Link is handled automatically for most Jira instances, but may require CustomFields mapping in some configurations.
 
 ### Category Tabs (Ownership, Quality, Security, Reliability)
 
@@ -394,9 +428,10 @@ Example:
 ```
 | Field Name      | Custom Field ID   | Data Wrapper |
 |-----------------|------------------|--------------|
-| Sprint Team     | customfield_10123| value        |
+| Sprint Team     | customfield_12900| value        |
+| Epic Link       | customfield_10506| none         |
+| Sprint          | customfield_10505| none         |
 | Story Points    | customfield_10002| none         |
-| Epic Link       | customfield_10100| value        |
 | Reporter        | reporter         | name         |
 ```
 

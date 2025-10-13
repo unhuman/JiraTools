@@ -125,6 +125,21 @@ Your Excel file should have the following sheets and formats:
 |-----|-------|
 | Priority | 4-Medium |
 
+#### CustomFields Sheet (Optional)
+| Field Name | Custom Field ID | Data Wrapper |
+|------------|----------------|--------------|
+| Sprint Team | customfield_12900 | value |
+| Epic Link | customfield_10506 | none |
+| Sprint | customfield_10505 | none |
+| Story Points | customfield_10002 | none |
+
+The **Data Wrapper** column controls how field values are formatted when sent to the Jira API:
+- When set to "value": The value is wrapped like `{"value": "field_value"}`
+- When set to "none" or left empty: The value is sent directly without wrapping
+- Any other string: The value is wrapped using that string as the key: `{"wrapper_name": "field_value"}`
+
+This flexibility allows compatibility with different Jira custom field formats.
+
 #### Teams Sheet
 | Sprint Team | Assignee | Project | Epic Link | Issue Type | Sprint | Sprint Name | Component |
 |-------------|----------|---------|----------|------------|--------|-------------|-----------|
@@ -142,22 +157,6 @@ Your Excel file should have the following sheets and formats:
 #### Quality Sheet
 | Team | Q1 | Q2 | Q3 |
 |------|----|----|-----|
-
-#### CustomFields Sheet (Optional)
-| Field Name | Custom Field ID | Data Wrapper |
-|------------|----------------|--------------|
-| Sprint Team | customfield_12900 | value |
-| Epic Link | customfield_10506 | none |
-| Sprint | customfield_10505 | none |
-| Story Points | customfield_10002 | none |
-
-The **Data Wrapper** column controls how field values are formatted when sent to the Jira API:
-- When set to "value": The value is wrapped like `{"value": "field_value"}`
-- When set to "none" or left empty: The value is sent directly without wrapping
-- Any other string: The value is wrapped using that string as the key: `{"wrapper_name": "field_value"}`
-
-This flexibility allows compatibility with different Jira custom field formats.
-
 | TeamA |   | X |   |
 | TeamB | X |   | X |
 | TeamC |   | X |   |

@@ -1,6 +1,6 @@
 # This script creates standard Jira tickets based on data from an Excel file
 # Runs in dry-run mode by default - use -c/--create to actually create tickets
-# pip install colorama | jira | pandas | openpyxl
+# pip install colorama jira pandas openpyxl
 #
 # Teams Sheet Fields:
 # - Sprint Team: Team identifier (required)
@@ -109,6 +109,26 @@ def read_config_sheet(file_path):
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Could not read Config sheet: {str(e)}. Using default values.{Style.RESET_ALL}")
         return {}
+
+def get_categories_from_config(config):
+    """Extract and parse categories from config, with fallback to default categories."""
+    import re
+    
+    # Get categories from config or use defaults
+    categories_config = config.get('Categories', config.get('categories', ''))
+    
+    if categories_config:
+        # Split by comma and clean up whitespace
+        categories = re.split(r'\s*,\s*', categories_config.strip())
+        # Filter out empty strings
+        categories = [cat for cat in categories if cat]
+        print(f"Using categories from Config sheet: {', '.join(categories)}")
+        return categories
+    else:
+        # Default categories
+        default_categories = ['Ownership', 'Quality', 'Security', 'Reliability']
+        print(f"No Categories found in Config sheet, using defaults: {', '.join(default_categories)}")
+        return default_categories
         
 def read_custom_fields_mapping(file_path):
     """Read the CustomFields sheet from the Excel file to get custom field mappings.
@@ -155,6 +175,1401 @@ def read_custom_fields_mapping(file_path):
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Could not read CustomFields sheet: {str(e)}. No custom field mappings will be used.{Style.RESET_ALL}")
         return {}
+
+def get_backstage_url_from_config(config):
+    """Extract Backstage URL from config dictionary."""
+    backstage_url = config.get('Backstage')
+    if backstage_url:
+        return backstage_url.rstrip('/')  # Remove trailing slash
+    return None
+
+def query_backstage_entity(backstage_url, team_name):
+    """Query Backstage API for entity scorecard data with enhanced health extraction."""
+    try:
+        # Use enhanced team health extraction
+        health_data = get_team_health_enhanced(backstage_url, team_name)
+        
+        if health_data:
+            # Convert to legacy format for compatibility with existing code
+            return {
+                'metadata': {
+                    'name': team_name,
+                    'annotations': {
+                        'enhanced-scorecard-data': json.dumps(health_data)
+                    }
+                }
+            }
+        else:
+            print(f"{Fore.YELLOW}Warning: Team '{team_name}' not found in Backstage{Style.RESET_ALL}")
+            return None
+            
+    except Exception as e:
+        print(f"{Fore.RED}Error connecting to Backstage for {team_name}: {e}{Style.RESET_ALL}")
+        return None
+
+def get_team_health_enhanced(backstage_url, team_name, categories=None):
+    """Enhanced team health data extraction from multiple Backstage sources."""
+    print(f"{Fore.CYAN}Extracting health data for team: {team_name}{Style.RESET_ALL}")
+    
+    # Use default categories if none provided
+    if categories is None:
+        categories = ['Ownership', 'Quality', 'Security', 'Reliability']
+    
+    # Try multiple API endpoints for comprehensive data extraction
+    health_data = None
+    
+    # Method 1: Try scorecards API endpoints
+    health_data = try_scorecards_api(backstage_url, team_name, categories)
+    
+    # Method 2: Fall back to catalog entity API
+    if not health_data:
+        health_data = try_catalog_api(backstage_url, team_name, categories)
+        
+    # Method 3: Try alternative endpoints
+    if not health_data:
+        health_data = try_alternative_apis(backstage_url, team_name, categories)
+        
+    if health_data:
+        print(f"{Fore.GREEN}  ✓ Successfully extracted health data for {team_name}{Style.RESET_ALL}")
+        print_health_summary(health_data)
+    else:
+        print(f"{Fore.YELLOW}  ⚠ No health data found for {team_name}{Style.RESET_ALL}")
+        
+    return health_data
+
+def try_scorecards_api(backstage_url, team_name, categories):
+    """Try dedicated scorecards API endpoints."""
+    try:
+        # First try GraphQL API that the UI actually uses - this contains complete track data
+        graphql_url = f"{backstage_url}/api/soundcheck/graphql"
+        graphql_query = {
+            "query": """query getAllCertifications($entityRef: String!) {
+                certifications(entityRef: $entityRef, includeFilteredChecks: false) {
+                    ...CertificationSummary
+                }
+            }
+            fragment CertificationSummary on Certification {
+                entityRef
+                track {
+                    id
+                    name
+                    description
+                    type
+                    draft
+                }
+                highestLevel {
+                    entityRef
+                    ordinal
+                    name
+                    checks {
+                        id
+                        name
+                    }
+                    badge {
+                        ... on BadgeVariantMedal {
+                            variant
+                            options {
+                                level
+                                color
+                            }
+                        }
+                    }
+                }
+                levels {
+                    ordinal
+                    name
+                    badge {
+                        ... on BadgeVariantMedal {
+                            variant
+                            options {
+                                level
+                                color
+                            }
+                        }
+                    }
+                    checks {
+                        id
+                        name
+                        entityRef
+                        result
+                        description
+                        timestamp
+                        details
+                    }
+                }
+            }""",
+            "variables": {
+                "entityRef": f"group:default/{team_name}"
+            }
+        }
+        
+        print(f"    Trying GraphQL API: /api/soundcheck/graphql")
+        response = requests.post(graphql_url, json=graphql_query, timeout=30)
+        print(f"    GraphQL Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'data' in data and 'certifications' in data['data']:
+                print(f"    ✓ Successfully found GraphQL certification data")
+                health_data = parse_graphql_certifications(data, categories, team_name)
+                if health_data:
+                    return health_data
+            else:
+                print(f"    GraphQL response structure: {list(data.keys()) if isinstance(data, dict) else 'not dict'}")
+        
+        # Fall back to REST API if GraphQL fails
+        url = f"{backstage_url}/api/soundcheck/results?entityRef=group:default/{team_name}"
+        print(f"    Falling back to REST API: /api/soundcheck/results?entityRef=group:default/{team_name}")
+        
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            data = response.json()
+            print(f"    REST API fallback successful")
+            health_data = parse_soundcheck_results(data, categories, team_name)
+            if health_data:
+                return health_data
+        
+        # Fall back to other API endpoints if needed
+        api_endpoints = [
+            f"/api/scorecards/entities/group:default/{team_name}",
+            f"/api/scorecards/group/default/{team_name}",
+            f"/api/soundcheck/entities/group:default/{team_name}",
+            f"/api/tech-insights/entities/group:default/{team_name}"
+        ]
+        
+        for endpoint in api_endpoints:
+            url = f"{backstage_url}{endpoint}"
+            print(f"    Trying scorecards API: {endpoint}")
+            
+            response = requests.get(url, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                health_data = parse_scorecards_response(data, categories)
+                if health_data:
+                    return health_data
+                    
+    except Exception as e:
+        print(f"    Scorecards API error: {e}")
+        
+    return None
+
+def try_catalog_api(backstage_url, team_name, categories):
+    """Try catalog entity API for health data."""
+    try:
+        url = f"{backstage_url}/api/catalog/entities/by-name/group/default/{team_name.lower()}"
+        print(f"    Trying catalog API: /api/catalog/entities/by-name/group/default/{team_name.lower()}")
+        
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            entity_data = response.json()
+            return parse_entity_health_data(entity_data, categories)
+            
+    except Exception as e:
+        print(f"    Catalog API error: {e}")
+        
+    return None
+
+def try_alternative_apis(backstage_url, team_name, categories):
+    """Try alternative API endpoints for health data."""
+    try:
+        # Try different API patterns that might contain scorecard data
+        alternative_endpoints = [
+            f"/api/catalog/entities?filter=kind=group,metadata.name={team_name}",
+            f"/api/catalog/entities/by-name/component/default/{team_name}",
+            f"/api/catalog/locations/by-entity/group:default/{team_name}"
+        ]
+        
+        for endpoint in alternative_endpoints:
+            url = f"{backstage_url}{endpoint}"
+            print(f"    Trying alternative API: {endpoint}")
+            
+            response = requests.get(url, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                health_data = parse_alternative_response(data, team_name, categories)
+                if health_data:
+                    return health_data
+                    
+    except Exception as e:
+        print(f"    Alternative API error: {e}")
+        
+    return None
+
+def parse_graphql_certifications(data, categories, team_name):
+    """Parse GraphQL certifications response to extract compliance data."""
+    try:
+        if 'errors' in data:
+            print(f"    GraphQL errors: {data['errors']}")
+            return None
+            
+        certifications = data.get('data', {}).get('certifications', [])
+        if not certifications:
+            print(f"    No certifications found for {team_name}")
+            return None
+            
+        print(f"    Found {len(certifications)} certifications")
+        
+        # Initialize health categories
+        health_categories = {}
+        for category in categories:
+            health_categories[category] = {}
+            
+        # Process all certifications (tracks)
+        all_checks = []
+        for cert in certifications:
+            track_name = cert.get('track', {}).get('name', 'Unknown')
+            print(f"    Processing track: {track_name}")
+            
+            # Extract checks from all levels
+            levels = cert.get('levels', [])
+            for level in levels:
+                level_name = level.get('name', '')
+                checks = level.get('checks', [])
+                print(f"      Level {level_name}: {len(checks)} checks")
+                
+                for check in checks:
+                    check_id = check.get('id', '')
+                    result = check.get('result', '')
+                    details = check.get('details', {})
+                    
+                    # Convert GraphQL format to our expected format and preserve level info
+                    converted_check = {
+                        'checkId': check_id,
+                        'state': result.lower() if result else 'unknown',
+                        'details': details,
+                        'backstage_level': level_name,  # Preserve actual Backstage level
+                        'track_name': track_name  # Preserve track name
+                    }
+                    all_checks.append(converted_check)
+        
+        print(f"    Total checks extracted from GraphQL: {len(all_checks)}")
+        
+        # Process checks using existing analysis logic
+        category_data = {}
+        unmapped_checks = []
+        for check in all_checks:
+            check_id = check['checkId']
+            state = check['state']
+            
+            # For GraphQL data, allow non-rollup checks since they're track-level aggregates
+            category = map_check_to_category(check_id, allow_non_rollups=True)
+            if category and category in categories:
+                if category not in category_data:
+                    category_data[category] = {
+                        'checks': [],
+                        'current_level': None,
+                        'improvement_needed': False
+                    }
+                
+                category_data[category]['checks'].append(check)
+            else:
+                unmapped_checks.append(f"{check_id} -> {category or 'NO_CATEGORY'}")
+        
+        # DEBUG: Show unmapped checks to identify missing patterns
+        if unmapped_checks:
+            print(f"    DEBUG GraphQL: {len(unmapped_checks)} unmapped checks:")
+            for check in unmapped_checks[:10]:  # Show first 10
+                print(f"      {check}")
+            if len(unmapped_checks) > 10:
+                print(f"      ... and {len(unmapped_checks)-10} more")
+                
+        # Analyze compliance levels for each category using existing logic
+        all_checks_for_analysis = []
+        for data in category_data.values():
+            all_checks_for_analysis.extend(data['checks'])
+            
+        for category, data in category_data.items():
+            if category in ['Ownership', 'Quality', 'Security', 'Reliability']:
+                # These categories need to see all checks for comprehensive analysis
+                # (checks may be categorized under different tracks in Backstage)
+                compliance_analysis = analyze_compliance_levels(all_checks_for_analysis, category)
+            else:
+                compliance_analysis = analyze_compliance_levels(data['checks'], category)
+                
+            if compliance_analysis and compliance_analysis['improvement_needed']:
+                print(f"    {category}: Currently at {compliance_analysis['current_level']}, improvement opportunities available")
+                health_categories[category] = compliance_analysis
+            else:
+                print(f"    {category}: At maximum compliance level - no improvement needed")
+        
+        # Remove categories with no failures
+        health_categories = {k: v for k, v in health_categories.items() if v}
+        
+        if health_categories:
+            print(f"    Will create tickets for {len(health_categories)} categories with compliance gaps")
+            return health_categories
+        else:
+            print(f"    No compliance gaps found for {team_name}")
+            return None
+            
+    except Exception as e:
+        print(f"    Error parsing GraphQL certifications: {e}")
+        return None
+
+def parse_soundcheck_results(data, categories, team_name):
+    """Parse actual soundcheck results to determine real compliance levels."""
+    try:
+        print(f"    Analyzing actual scorecard compliance for {team_name}...")
+        
+        # Initialize categories with no failed checks
+        health_categories = {}
+        for category in categories:
+            health_categories[category] = {}
+        
+        results = data.get('results', [])
+        if not results:
+            print(f"    No check results found for {team_name}")
+            return None
+            
+        print(f"    Found {len(results)} checks to analyze")
+        
+        # Analyze each check result to build comprehensive compliance picture
+        category_data = {}
+        unmapped_checks = []
+        for result in results:
+            check_id = result.get('checkId', '')
+            state = result.get('state', '')
+            
+            category = map_check_to_category(check_id)
+            if category and category in categories:
+                if category not in category_data:
+                    category_data[category] = {
+                        'checks': [],
+                        'current_level': None,
+                        'improvement_needed': False
+                    }
+                
+                category_data[category]['checks'].append({
+                    'checkId': check_id,
+                    'state': state,
+                    'details': result.get('details', {})
+                })
+            else:
+                unmapped_checks.append(f"{check_id} -> {category or 'NO_CATEGORY'}")
+        
+        # DEBUG: Show unmapped checks to identify missing patterns
+        if unmapped_checks:
+            print(f"    DEBUG: {len(unmapped_checks)} unmapped checks:")
+            for check in unmapped_checks[:10]:  # Show first 10
+                print(f"      {check}")
+            if len(unmapped_checks) > 10:
+                print(f"      ... and {len(unmapped_checks)-10} more")
+        
+        # Analyze compliance levels for each category
+        # Some categories need access to all checks since their requirements reference checks from other categories
+        all_checks = []
+        for data in category_data.values():
+            all_checks.extend(data['checks'])
+            
+        for category, data in category_data.items():
+            if category in ['Ownership', 'Quality', 'Security', 'Reliability']:
+                # These categories need to see all checks for comprehensive analysis
+                # (checks may be categorized under different tracks in Backstage)
+                compliance_analysis = analyze_compliance_levels(all_checks, category)
+            else:
+                compliance_analysis = analyze_compliance_levels(data['checks'], category)
+                
+            if compliance_analysis and compliance_analysis['improvement_needed']:
+                print(f"    {category}: Currently at {compliance_analysis['current_level']}, improvement opportunities available")
+                health_categories[category] = compliance_analysis
+            else:
+                print(f"    {category}: At maximum compliance level - no improvement needed")
+        
+        # Remove categories with no failures
+        health_categories = {k: v for k, v in health_categories.items() if v}
+        
+        if health_categories:
+            print(f"    Will create tickets for {len(health_categories)} categories with compliance gaps")
+        else:
+            print(f"    No compliance gaps found - no tickets will be created for {team_name}")
+            
+        return health_categories if health_categories else None
+        
+    except Exception as e:
+        print(f"    Error parsing soundcheck results: {e}")
+        return None
+
+def map_check_to_category(check_id, allow_non_rollups=False):
+    """Map a Backstage check ID to a scorecard category using configurable patterns."""
+    check_id_lower = check_id.lower()
+    
+    # For REST API, only consider rollup checks for scorecard categories as these represent
+    # the team's overall performance, not individual entity-level issues
+    # For GraphQL API, allow track-level checks without .rollups suffix
+    if not allow_non_rollups and not check_id_lower.endswith('.rollups'):
+        return None  # Skip individual entity checks - they're not scorecard-level
+    
+    # Define category mapping patterns - easily extensible for new categories
+    # Order matters: Quality patterns checked before Security to catch production bug SLA
+    category_patterns = {
+        'Ownership': ['ownership'],
+        'Quality': [
+            # Code quality
+            'sonar', 'coverage', 'test', 'quality', 'code',
+            # Test types (case-insensitive matching)
+            'bluecumber', 'cucumber', 'e2e', 'wdio', 'integration', 
+            # Production bugs and SLA
+            'prodbug', 'prod', 'bug', 'sev1', 'sev2', 'sev3', 'sev4', 'a11y',
+            # Test pass rates
+            'pass', 'rate', 'passing', 'itpass', 'percentage'
+        ],
+        'Security': ['security', 'vuln', 'cve', 'auth', 'api-key', 'mend', 'challenge'],
+        'Reliability': ['deployment', 'monitor', 'uptime', 'reliability', 'pager', 'datadog', 'sla']
+    }
+    
+    # Check for specific Quality check patterns we discovered in GraphQL
+    quality_specific_checks = [
+        'zerosev1sev2prodbugs', 'zerosev1prodbugs', 'prodbuginslaover80percentage',
+        'itpassrateover95percent', 'e2ebluecumberpassrateover', 'e2ewdiopassrateover',
+        'bluecumberpassrate', 'wdiopassrate', 'itpassrate'
+    ]
+    
+    if any(specific in check_id_lower for specific in quality_specific_checks):
+        return 'Quality'
+    
+    # Check for specific Security check patterns
+    security_specific_checks = [
+        'challengetimelessthanthandoubleplus', 'challengetime'
+    ]
+    
+    if any(specific in check_id_lower for specific in security_specific_checks):
+        return 'Security'
+    
+    # Check each category's patterns
+    for category, patterns in category_patterns.items():
+        if any(term in check_id_lower for term in patterns):
+            return category
+    
+    # For rollup checks without clear category mapping, try to infer from name
+    if 'check' in check_id_lower:
+        # Default rollup checks to Quality category if no specific mapping found
+        return 'Quality'
+    
+    return None  # Skip checks that don't fit scorecard categories
+
+def analyze_compliance_levels(checks, category):
+    """Analyze compliance levels from rollup checks to determine current status and improvement opportunities."""
+    try:
+        # Determine current compliance level and opportunities based on category-specific logic
+        return analyze_category_compliance(checks, category)
+        
+    except Exception as e:
+        print(f"    Error analyzing compliance levels: {e}")
+        return None
+
+def analyze_category_compliance(checks, category):
+    """Analyze compliance levels for specific categories based on business rules."""
+    
+    if category == 'Ownership':
+        return analyze_ownership_compliance(checks)
+    elif category == 'Quality':
+        return analyze_quality_compliance(checks)
+    elif category == 'Security':
+        return analyze_security_compliance(checks)
+    elif category == 'Reliability':
+        return analyze_reliability_compliance(checks)
+    else:
+        # Generic analysis for unknown categories
+        return analyze_generic_compliance(checks, category)
+
+def analyze_ownership_compliance(checks):
+    """Analyze Ownership compliance levels based on actual check results."""
+    
+    # Find all failing ownership-related checks
+    failing_checks = []
+    for check in checks:
+        # Use actual track_name from GraphQL data to determine category
+        track_name = check.get('track_name', '')
+        
+        # Only include checks that are actually from the Ownership track
+        if track_name == 'Ownership':
+            if check['state'] in ['failed', 'warning']:
+                failing_checks.append(check)
+    
+    # Analyze failing checks using their actual Backstage level information  
+    improvement_details = []
+    highest_passing_level = 'L3'  # Default to highest for Ownership (L0-L3)
+    
+    for check in failing_checks:
+        check_details = parse_check_details(check.get('details', {}))
+        
+        # Use actual Backstage level from GraphQL data (not hardcoded logic!)
+        backstage_level = check.get('backstage_level', 'Level 1')  # Default fallback
+        track_name = check.get('track_name', 'Unknown')
+        
+        # Convert Backstage level format to our format
+        if backstage_level.startswith('Level '):
+            level_number = backstage_level.replace('Level ', '')
+            if level_number == '0':
+                check_level = 'L1'  # Level 0 becomes L1 (basic)
+            else:
+                check_level = f'L{level_number}'
+        else:
+            check_level = 'L1'  # Fallback for ownership issues
+        
+        # Track the lowest level that has issues (determines current compliance level)
+        if check_level < highest_passing_level:
+            highest_passing_level = check_level
+        
+        improvement_details.append({
+            'level': f'{check_level}-Issue',
+            'level_name': convert_check_id_to_readable_name(check['checkId']),
+            'threshold': f"{check_details.get('current_count', 0)}/{check_details.get('total_count', 1)} ({check_details.get('percentage', 0):.0f}%)",
+            'check_id': check['checkId'],
+            'state': check['state'],
+            'current_count': check_details.get('current_count', 0),
+            'total_count': check_details.get('total_count', 1),
+            'needed_count': check_details.get('total_count', 1) - check_details.get('current_count', 0),
+            'percentage': check_details.get('percentage', 0),
+            'target': check_details.get('target', {}),
+            'level_category': check_level,
+            'backstage_level': backstage_level,  # Include original level info
+            'track_name': track_name
+        })
+    
+    # Determine current level based on failing checks
+    if failing_checks:
+        # If there are failing checks, current level is one below the lowest failing level
+        if highest_passing_level == 'L1':
+            current_level = 'NL'  # Not even at L1
+        else:
+            # Convert back to determine current level
+            level_num = int(highest_passing_level[1:]) - 1
+            current_level = f'L{level_num}' if level_num > 0 else 'NL'
+    else:
+        # Check if there are any Ownership checks at all
+        has_any_ownership_checks = any(
+            check.get('track_name') == 'Ownership'
+            for check in checks
+        )
+        
+        if has_any_ownership_checks:
+            current_level = 'L3'  # Passing all available ownership checks
+        else:
+            current_level = 'L1'  # Default ownership level if no checks found
+    
+    return {
+        'current_level': current_level,
+        'max_available_level': 'L3',
+        'improvement_needed': len(failing_checks) > 0,
+        'improvement_details': improvement_details,
+        'category': 'Ownership',
+        'analysis_type': 'level_based'
+    }
+
+def analyze_quality_compliance(checks):
+    """Analyze Quality compliance levels based on actual check results."""
+    
+    # Separate Quality checks into categories for comprehensive analysis
+    sonar_coverage_checks = []
+    production_bug_checks = []
+    test_pass_rate_checks = []
+    other_quality_checks = []
+    
+    for check in checks:
+        check_id = check['checkId']
+        check_id_lower = check_id.lower()
+        track_name = check.get('track_name', '')
+        
+        # Only process checks from the Quality track
+        if track_name != 'Quality':
+            continue
+        
+        # Categorize Quality checks by check ID patterns
+        if 'sonarcoverage' in check_id_lower or 'coverage' in check_id_lower:
+            sonar_coverage_checks.append(check)
+        elif 'prodbug' in check_id_lower or 'prodbugin' in check_id_lower:
+            production_bug_checks.append(check)
+        elif any(term in check_id_lower for term in ['passrate', 'bluecumber', 'e2e', 'wdio', 'itpass']):
+            test_pass_rate_checks.append(check)
+        else:
+            other_quality_checks.append(check)
+    
+    # Collect ALL failing/warning Quality checks for improvement opportunities
+    failing_checks = []
+    all_quality_checks = sonar_coverage_checks + production_bug_checks + test_pass_rate_checks + other_quality_checks
+    
+    for check in all_quality_checks:
+        if check['state'] in ['failed', 'warning']:
+            failing_checks.append(check)
+    
+    # Determine current compliance level (use SonarQube as primary indicator, supplemented by others)
+    current_level = 'L1'  # Default level
+    if sonar_coverage_checks:
+        # Use existing SonarQube level logic as baseline
+        sonar_30_passed = any(check['checkId'] == 'sonarCoverageCheckComponent30.rollups' and check['state'] == 'passed' for check in sonar_coverage_checks)
+        sonar_50_passed = any(check['checkId'] == 'sonarCoverageCheckComponent50.rollups' and check['state'] == 'passed' for check in sonar_coverage_checks)
+        sonar_70_passed = any(check['checkId'] == 'sonarCoverageCheckComponent70.rollups' and check['state'] == 'passed' for check in sonar_coverage_checks)
+        sonar_90_passed = any(check['checkId'] == 'sonarCoverageCheckComponent90.rollups' and check['state'] == 'passed' for check in sonar_coverage_checks)
+        
+        if sonar_90_passed:
+            current_level = 'L4'
+        elif sonar_70_passed:
+            current_level = 'L3'
+        elif sonar_50_passed:
+            current_level = 'L2'
+        elif sonar_30_passed:
+            current_level = 'L1'
+    
+    # Build comprehensive improvement details for ALL failing Quality checks
+    improvement_details = []
+    
+    # Add SonarQube coverage issues (existing working logic)
+    for check in sonar_coverage_checks:
+        if check['state'] in ['failed', 'warning']:
+            check_details = parse_check_details(check.get('details', {}))
+            
+            # Determine level based on SonarQube check type
+            check_level = 'L1'
+            if '50' in check['checkId']:
+                check_level = 'L2'
+            elif '70' in check['checkId']:
+                check_level = 'L3'
+            elif '90' in check['checkId']:
+                check_level = 'L4'
+            
+            improvement_details.append({
+                'level': f'{check_level}-Issue',
+                'level_name': convert_check_id_to_readable_name(check['checkId']),
+                'threshold': f"{check_details.get('current_count', 0)}/{check_details.get('total_count', 1)} ({check_details.get('percentage', 0):.0f}%)",
+                'check_id': check['checkId'],
+                'state': check['state'],
+                'current_count': check_details.get('current_count', 0),
+                'total_count': check_details.get('total_count', 1),
+                'needed_count': check_details.get('total_count', 1) - check_details.get('current_count', 0),
+                'percentage': check_details.get('percentage', 0),
+                'target': check_details.get('target', {}),
+                'level_category': check_level
+            })
+    
+    # Add ALL failing Quality checks using their actual Backstage level information
+    all_failing_quality_checks = production_bug_checks + test_pass_rate_checks + other_quality_checks
+    
+    for check in all_failing_quality_checks:
+        if check['state'] in ['failed', 'warning']:
+            check_details = parse_check_details(check.get('details', {}))
+            percentage = check_details.get('percentage', 0)
+            
+            # Use actual Backstage level from GraphQL data (not hardcoded logic!)
+            backstage_level = check.get('backstage_level', 'Level 1')  # Default fallback
+            track_name = check.get('track_name', 'Unknown')
+            
+            # Convert Backstage level format to our format
+            if backstage_level.startswith('Level '):
+                level_number = backstage_level.replace('Level ', '')
+                if level_number == '0':
+                    check_level = 'L1'  # Level 0 becomes L1 (basic)
+                else:
+                    check_level = f'L{level_number}'
+            else:
+                check_level = 'L2'  # Fallback
+            
+            # Determine appropriate target percentage based on check type
+            target_percentage = 80  # Default
+            if 'over85' in check['checkId'].lower():
+                target_percentage = 85
+            elif 'over95' in check['checkId'].lower():
+                target_percentage = 95
+            elif 'over99' in check['checkId'].lower():
+                target_percentage = 99
+            elif 'over100' in check['checkId'].lower() or '100percentage' in check['checkId'].lower():
+                target_percentage = 100
+            
+            improvement_details.append({
+                'level': f'{check_level}-Issue',
+                'level_name': convert_check_id_to_readable_name(check['checkId']),
+                'threshold': f"{percentage:.0f}% (target: {target_percentage}%+)" if target_percentage != 80 else f"{percentage:.0f}%",
+                'check_id': check['checkId'],
+                'state': check['state'],
+                'current_count': check_details.get('current_count', 0),
+                'total_count': check_details.get('total_count', 1),
+                'needed_count': check_details.get('total_count', 1) - check_details.get('current_count', 0),
+                'percentage': percentage,
+                'target': {'lower': target_percentage, 'upper': 100},
+                'level_category': check_level,
+                'backstage_level': backstage_level,  # Include original level info
+                'track_name': track_name
+            })
+    
+    # Determine max available level and improvement needed
+    max_available_level = 'L4'
+    improvement_needed = len(improvement_details) > 0
+    
+    return {
+        'current_level': current_level,
+        'max_available_level': max_available_level,
+        'improvement_needed': improvement_needed,
+        'improvement_details': improvement_details,
+        'category': 'Quality',
+        'analysis_type': 'level_based'
+    }
+
+def analyze_security_compliance(checks):
+    """Analyze Security compliance levels based on actual check results."""
+    
+    # Note: Security SLA requirements are not yet fully implemented in Backstage
+    # Expected requirements (for future implementation):
+    # L1: 80% of the Security Issue backlog is within SLA end date
+    # L2: 80% of the Security Issue backlog is within original SLA end date  
+    # L3: Challenge Time < 2x original SLA + No outstanding Low+ Issues + 100% within original SLA
+    
+    # Look for any actual security-related checks that are failing
+    failing_checks = []
+    
+    # Find any Security checks that are actually failing
+    for check in checks:
+        track_name = check.get('track_name', '')
+        
+        # Only include checks from the Security track
+        if track_name == 'Security':
+            if check['state'] in ['failed', 'warning']:
+                failing_checks.append(check)
+    
+    # Analyze failing checks using their actual Backstage level information  
+    improvement_details = []
+    highest_passing_level = 'L3'  # Default to highest for Security (L0-L3)
+    
+    for check in failing_checks:
+        check_details = parse_check_details(check.get('details', {}))
+        
+        # Use actual Backstage level from GraphQL data (not hardcoded logic!)
+        backstage_level = check.get('backstage_level', 'Level 1')  # Default fallback
+        track_name = check.get('track_name', 'Unknown')
+        
+        # Convert Backstage level format to our format
+        if backstage_level.startswith('Level '):
+            level_number = backstage_level.replace('Level ', '')
+            if level_number == '0':
+                check_level = 'L1'  # Level 0 becomes L1 (basic)
+            else:
+                check_level = f'L{level_number}'
+        else:
+            check_level = 'L1'  # Fallback for security issues
+        
+        # Track the lowest level that has issues (determines current compliance level)
+        if check_level < highest_passing_level:
+            highest_passing_level = check_level
+        
+        improvement_details.append({
+            'level': f'{check_level}-Issue',
+            'level_name': convert_check_id_to_readable_name(check['checkId']),
+            'threshold': f"{check_details.get('current_count', 0)}/{check_details.get('total_count', 1)} ({check_details.get('percentage', 0):.0f}%)",
+            'check_id': check['checkId'],
+            'state': check['state'],
+            'current_count': check_details.get('current_count', 0),
+            'total_count': check_details.get('total_count', 1),
+            'needed_count': check_details.get('total_count', 1) - check_details.get('current_count', 0),
+            'percentage': check_details.get('percentage', 0),
+            'target': check_details.get('target', {}),
+            'level_category': check_level,
+            'backstage_level': backstage_level,  # Include original level info
+            'track_name': track_name
+        })
+    
+    # Determine current level based on failing checks
+    if failing_checks:
+        # If there are failing checks, current level is one below the lowest failing level
+        if highest_passing_level == 'L1':
+            current_level = 'NL'  # Not even at L1
+        else:
+            # Convert back to determine current level
+            level_num = int(highest_passing_level[1:]) - 1
+            current_level = f'L{level_num}' if level_num > 0 else 'NL'
+    else:
+        # Check if there are any Security checks at all
+        has_any_security_checks = any(
+            check.get('track_name') == 'Security'
+            for check in checks
+        )
+        
+        if has_any_security_checks:
+            current_level = 'L3'  # Passing all available security checks
+        else:
+            current_level = 'L3'  # No security checks found - assume compliant
+    
+    return {
+        'current_level': current_level,
+        'max_available_level': 'L3',
+        'improvement_needed': len(failing_checks) > 0,
+        'improvement_details': improvement_details,
+        'category': 'Security',
+        'analysis_type': 'level_based'
+    }
+
+def analyze_reliability_compliance(checks):
+    """Analyze Reliability compliance levels based on actual check results."""
+    
+    # Find all failing reliability-related checks
+    failing_checks = []
+    for check in checks:
+        track_name = check.get('track_name', '')
+        
+        # Only include checks from the Reliability track
+        if track_name == 'Reliability':
+            if check['state'] in ['failed', 'warning']:
+                failing_checks.append(check)
+    
+    # Analyze failing checks using their actual Backstage level information  
+    improvement_details = []
+    highest_passing_level = 'L3'  # Default to highest for Reliability (L1-L3)
+    
+    for check in failing_checks:
+        check_details = parse_check_details(check.get('details', {}))
+        
+        # Use actual Backstage level from GraphQL data (not hardcoded logic!)
+        backstage_level = check.get('backstage_level', 'Level 1')  # Default fallback
+        track_name = check.get('track_name', 'Unknown')
+        
+        # Convert Backstage level format to our format
+        if backstage_level.startswith('Level '):
+            level_number = backstage_level.replace('Level ', '')
+            if level_number == '0':
+                check_level = 'L1'  # Level 0 becomes L1 (basic)
+            else:
+                check_level = f'L{level_number}'
+        else:
+            check_level = 'L1'  # Fallback for reliability issues
+        
+        # Track the lowest level that has issues (determines current compliance level)
+        if check_level < highest_passing_level:
+            highest_passing_level = check_level
+        
+        improvement_details.append({
+            'level': f'{check_level}-Issue',
+            'level_name': convert_check_id_to_readable_name(check['checkId']),
+            'threshold': f"{check_details.get('current_count', 0)}/{check_details.get('total_count', 1)} ({check_details.get('percentage', 0):.0f}%)",
+            'check_id': check['checkId'],
+            'state': check['state'],
+            'current_count': check_details.get('current_count', 0),
+            'total_count': check_details.get('total_count', 1),
+            'needed_count': check_details.get('total_count', 1) - check_details.get('current_count', 0),
+            'percentage': check_details.get('percentage', 0),
+            'target': check_details.get('target', {}),
+            'level_category': check_level,
+            'backstage_level': backstage_level,  # Include original level info
+            'track_name': track_name
+        })
+    
+    # Determine current level based on failing checks
+    if failing_checks:
+        # If there are failing checks, current level is one below the lowest failing level
+        if highest_passing_level == 'L1':
+            current_level = 'NL'  # Not even at L1
+        else:
+            # Convert back to determine current level
+            level_num = int(highest_passing_level[1:]) - 1
+            current_level = f'L{level_num}' if level_num > 0 else 'NL'
+    else:
+        # Check if there are any Reliability checks at all
+        has_any_reliability_checks = any(
+            check.get('track_name') == 'Reliability'
+            for check in checks
+        )
+        
+        if has_any_reliability_checks:
+            current_level = 'L3'  # Passing all available reliability checks
+        else:
+            current_level = 'L3'  # No reliability checks found - assume compliant
+    
+    return {
+        'current_level': current_level,
+        'max_available_level': 'L3',
+        'improvement_needed': len(failing_checks) > 0,
+        'improvement_details': improvement_details,
+        'category': 'Reliability',
+        'analysis_type': 'level_based'
+    }
+
+def create_level_opportunities(category, current_level, opportunity_levels):
+    """Create improvement opportunities for specific levels."""
+    improvement_details = []
+    
+    for level in opportunity_levels:
+        improvement_details.append({
+            'level': level,
+            'level_name': f'{category} {level}',
+            'threshold': level,
+            'current_count': 0 if current_level == 'NL' else int(level[1:]) - 1,
+            'total_count': int(level[1:]),
+            'needed_count': int(level[1:]) if current_level == 'NL' else 1,
+            'percentage': 0 if current_level == 'NL' else ((int(level[1:]) - 1) / int(level[1:])) * 100,
+            'description': f'Achieve {category} {level} compliance requirements'
+        })
+    
+    return {
+        'current_level': current_level,
+        'max_available_level': opportunity_levels[-1] if opportunity_levels else 'L4',
+        'improvement_needed': True,
+        'improvement_details': improvement_details,
+        'category': category,
+        'analysis_type': 'level_based'
+    }
+
+def analyze_generic_compliance(checks, category):
+    """Generic compliance analysis for unknown categories."""
+    failing_checks = [c for c in checks if c['state'] in ['failed', 'warning']]
+    
+    if failing_checks:
+        improvement_details = []
+        for i, check in enumerate(failing_checks):
+            check_details = parse_check_details(check.get('details', {}))
+            improvement_details.append({
+                'level': f'Issue-{i+1}',
+                'level_name': convert_check_id_to_readable_name(check['checkId']),
+                'threshold': f"{check_details.get('current_count', 0)}/{check_details.get('total_count', 1)} ({check_details.get('percentage', 0):.0f}%)",
+                'check_id': check['checkId'],
+                'state': check['state'],
+                'current_count': check_details.get('current_count', 0),
+                'total_count': check_details.get('total_count', 1),
+                'needed_count': check_details.get('total_count', 1) - check_details.get('current_count', 0),
+                'percentage': check_details.get('percentage', 0),
+                'target': check_details.get('target', {})
+            })
+        
+        return {
+            'current_level': 'Has Issues',
+            'max_available_level': f'{len(failing_checks)} Issues Found',
+            'improvement_needed': True,
+            'improvement_details': improvement_details,
+            'category': category,
+            'analysis_type': 'specific_failures'
+        }
+    
+    return None
+
+def convert_check_id_to_readable_name(check_id):
+    """Convert a Backstage check ID to a human-friendly name."""
+    # Remove .rollups suffix if present
+    name = check_id.replace('.rollups', '')
+    
+    # Handle specific known check patterns
+    check_patterns = {
+        'defaultMonitorPagerdutyEnabledCheck': 'PagerDuty Default Monitors Enabled',
+        'defaultMonitorPagingPriorityCheck': 'PagerDuty Default Monitor Paging Priority',
+        'datadogIntegrationCheck': 'Datadog Integration',
+        'datadogAPMInstrumentationCheck': 'Datadog APM Instrumentation',
+        'deploymentDriftCheck': 'Deployment Drift Check',
+        'lastDeploymentCheck': 'Recent Deployment Check',
+        'pagerDutyIntegrationCheck': 'PagerDuty Integration',
+        'outOfDateDeploymentsCheck': 'Out of Date Deployments',
+        'deploymentAZResilientCheck': 'Deployment AZ Resilience',
+        'sonarCoverageCheckComponent30': 'SonarQube Code Coverage (30%)',
+        'sonarCoverageCheckComponent50': 'SonarQube Code Coverage (50%)',
+        'sonarCoverageCheckComponent70': 'SonarQube Code Coverage (70%)',
+        'sonarCoverageCheckComponent90': 'SonarQube Code Coverage (90%)',
+        'prodBugInSlaOver80Percentage': 'Production Bug SLA > 80%',
+        'prodBugInSlaOver90Percentage': 'Production Bug SLA > 90%',
+        'prodBugInSlaOver100Percentage': 'Production Bug SLA = 100%',
+        'eightyPercentWithinOriginalSlaCheck': '80% Within Original SLA',
+        'oneHundredPercentWithinOriginalSlaCheck': '100% Within Original SLA',
+        'moreThan80WithinSlaCheck': 'More Than 80% Within SLA',
+        'noSlaMissLowPlusCheck': 'No SLA Miss (Low+ Priority)',
+        'noSlaMissMediumPlusCheck': 'No SLA Miss (Medium+ Priority)',
+        'noSlaMissUrgentPlusCheck': 'No SLA Miss (Urgent+ Priority)',
+        'challengeTimeLessThanDoubleSlaExternalCheck': 'Challenge Time < 2x SLA (External)',
+        'challengeTimeLessThanDoubleSlaHighPlusCheck': 'Challenge Time < 2x SLA (High+)',
+        'challengeTimeLessThanDoubleSlaLowPlusCheck': 'Challenge Time < 2x SLA (Low+)',
+        'preventableRcaUnder30': 'Preventable RCA Under 30%'
+    }
+    
+    # Check for exact match first
+    if name in check_patterns:
+        return check_patterns[name]
+    
+    # Try partial matches for dynamic check names
+    for pattern, readable in check_patterns.items():
+        if pattern in name:
+            return readable
+    
+    # Generic transformation if no specific pattern found
+    # Convert camelCase to Title Case and add spaces
+    import re
+    
+    # Handle camelCase to Title Case
+    name = re.sub(r'([a-z])([A-Z])', r'\1 \2', name)
+    
+    # Handle consecutive capitals
+    name = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', name)
+    
+    # Remove common suffixes
+    name = re.sub(r'\s*Check$', '', name, flags=re.IGNORECASE)
+    
+    # Title case
+    name = name.title()
+    
+    # Fix common abbreviations
+    name = re.sub(r'\bSla\b', 'SLA', name)
+    name = re.sub(r'\bApi\b', 'API', name)
+    name = re.sub(r'\bRca\b', 'RCA', name)
+    name = re.sub(r'\bAz\b', 'AZ', name)
+    name = re.sub(r'\bApm\b', 'APM', name)
+    
+    return name
+
+def extract_level_from_check_id(check_id):
+    """Extract compliance level information from check ID."""
+    import re
+    
+    # Map coverage percentages to levels
+    coverage_to_level = {
+        '30': {'level': 'L1', 'name': 'Basic Coverage', 'threshold': '30%'},
+        '50': {'level': 'L2', 'name': 'Moderate Coverage', 'threshold': '50%'},
+        '70': {'level': 'L3', 'name': 'Good Coverage', 'threshold': '70%'},
+        '90': {'level': 'L4', 'name': 'Excellent Coverage', 'threshold': '90%'}
+    }
+    
+    # Look for coverage percentage patterns (Quality checks)
+    coverage_match = re.search(r'coverage.*?(\d{2})', check_id)
+    if coverage_match:
+        percentage = coverage_match.group(1)
+        return coverage_to_level.get(percentage)
+    
+    # Handle rollup checks that don't have coverage patterns - map to L1 basic level
+    if check_id.lower().endswith('.rollups'):
+        # Define basic level patterns for different categories
+        basic_level_patterns = {
+            'ownership': 'Ownership',
+            'security': 'Security', 
+            'vuln': 'Security',
+            'cve': 'Security',
+            'auth': 'Security',
+            'api-key': 'Security',
+            'mend': 'Security',
+            'deployment': 'Reliability',
+            'monitor': 'Reliability',
+            'sla': 'Reliability',
+            'uptime': 'Reliability',
+            'reliability': 'Reliability',
+            'pager': 'Reliability',
+            'datadog': 'Reliability'
+        }
+        
+        # Check for any basic level pattern matches
+        for term, category in basic_level_patterns.items():
+            if term in check_id.lower():
+                return {'level': 'L1', 'name': f'Basic {category}', 'threshold': 'L1'}
+    
+    # Add other level mapping patterns as needed
+    return None
+
+def parse_check_details(details):
+    """Parse check details to extract metrics."""
+    try:
+        notes = details.get('notes', {})
+        data_str = notes.get('data', '{}')
+        
+        if isinstance(data_str, str):
+            import json
+            data = json.loads(data_str)
+        else:
+            data = data_str
+            
+        value = data.get('value', {})
+        target = data.get('target', {})
+        
+        return {
+            'current_count': value.get('count', 0),
+            'total_count': value.get('total', 0),
+            'percentage': value.get('percentage', 0),
+            'target': target
+        }
+    except Exception:
+        return {'current_count': 0, 'total_count': 0, 'percentage': 0, 'target': {}}
+
+def parse_scorecards_response(data, categories):
+    """Parse response from dedicated scorecards API."""
+    try:
+        health_categories = {
+            'Ownership': {},
+            'Quality': {},
+            'Security': {},
+            'Reliability': {}
+        }
+        
+        # Handle different response structures
+        if 'scorecards' in data:
+            scorecards = data['scorecards']
+        elif 'results' in data:
+            scorecards = data['results']
+        elif isinstance(data, list):
+            scorecards = data
+        else:
+            scorecards = [data]
+        
+        found_data = False
+        for scorecard in scorecards:
+            if 'checks' in scorecard:
+                for check in scorecard['checks']:
+                    category = detect_category_from_name(check.get('name', ''))
+                    if category and check.get('passed', False):
+                        found_data = True
+                        levels = extract_levels_from_name(check.get('name', ''))
+                        health_categories[category].update(levels)
+        
+        return health_categories if found_data else None
+        
+    except Exception as e:
+        print(f"    Error parsing scorecards response: {e}")
+        return None
+
+def parse_entity_health_data(entity_data, categories):
+    """Parse health data from catalog entity response for specified categories."""
+    try:
+        metadata = entity_data.get('metadata', {})
+        annotations = metadata.get('annotations', {})
+        spec = entity_data.get('spec', {})
+        relations = entity_data.get('relations', [])
+        
+        # Initialize health categories based on config
+        health_categories = {}
+        for category in categories:
+            health_categories[category] = {}
+        
+        found_data = False
+        
+        # Look for scorecard annotations
+        for key, value in annotations.items():
+            if any(term in key.lower() for term in ['scorecard', 'compliance', 'health', 'soundcheck']):
+                found_data = True
+                category_data = parse_annotation_health_value(key, value)
+                
+                # Map to health categories
+                for category in health_categories.keys():
+                    if category.lower() in key.lower():
+                        health_categories[category].update(category_data)
+                        break
+                else:
+                    # If no specific category match, infer from scorecard domain
+                    if 'scorecard-domain' in key.lower() and 'Ownership' in health_categories:
+                        # Infer health status based on having a scorecard domain
+                        health_categories['Ownership']['L1'] = 'X'  # Has team structure
+                        found_data = True
+        
+        # Infer health data from entity structure for all configured categories
+        # This ensures we create tickets for all specified categories
+        
+        # Check for ownership indicators
+        if 'Ownership' in health_categories and (spec.get('members') and len(spec.get('members', [])) > 0):
+            health_categories['Ownership']['L1'] = 'X'  # Has team members
+            found_data = True
+        
+        # Check for component ownership (quality indicator)
+        owned_components = [r for r in relations if r.get('type') == 'ownerOf' and 'component:' in r.get('targetRef', '')]
+        if 'Quality' in health_categories and owned_components:
+            health_categories['Quality']['L1'] = 'X'  # Owns components
+            found_data = True
+        
+        # Check for contact information (reliability indicator)
+        if 'Reliability' in health_categories and (spec.get('contacts') and len(spec.get('contacts', [])) > 0):
+            health_categories['Reliability']['L1'] = 'X'  # Has contact info
+            found_data = True
+        
+        # For Security, infer from team structure or add default level
+        if 'Security' in health_categories and spec.get('members'):
+            health_categories['Security']['L1'] = 'X'  # Has team for security responsibilities
+            found_data = True
+        
+        # If no data found but categories are configured, create default L1 entries for all categories
+        # This ensures tickets are created for all requested categories
+        if not found_data and categories:
+            for category in categories:
+                health_categories[category]['L1'] = 'X'  # Default compliance level
+            found_data = True
+            print("    No specific health indicators found, creating default L1 entries for all categories")
+        
+        return health_categories if found_data else None
+        
+    except Exception as e:
+        print(f"    Error parsing entity health data: {e}")
+        return None
+
+def parse_alternative_response(data, team_name, categories):
+    """Parse response from alternative scorecard APIs."""
+    try:
+        if 'entities' in data:
+            for entity in data['entities']:
+                if entity.get('metadata', {}).get('name', '').lower() == team_name.lower():
+                    return parse_entity_health_data(entity, categories)
+        
+        return None
+        
+    except Exception as e:
+        print(f"    Error parsing alternative response: {e}")
+        return None
+
+def detect_category_from_name(name):
+    """Detect health category from check/annotation name."""
+    name_lower = name.lower()
+    
+    if any(term in name_lower for term in ['owner', 'ownership', 'responsible', 'maintainer']):
+        return 'Ownership'
+    elif any(term in name_lower for term in ['quality', 'code', 'test', 'coverage', 'sonar']):
+        return 'Quality'
+    elif any(term in name_lower for term in ['security', 'vuln', 'cve', 'scan', 'auth']):
+        return 'Security'
+    elif any(term in name_lower for term in ['reliability', 'uptime', 'sla', 'monitor', 'alert']):
+        return 'Reliability'
+    
+    return None
+
+def extract_levels_from_name(name):
+    """Extract compliance levels from check name."""
+    levels = {}
+    
+    # Look for level indicators like L1, L2, L3, etc.
+    import re
+    level_matches = re.findall(r'[lL](\d+)', name)
+    if level_matches:
+        for level_num in level_matches:
+            levels[f'L{level_num}'] = 'X'
+    else:
+        # Default to L1 if no specific level found
+        levels['L1'] = 'X'
+    
+    return levels
+
+def parse_annotation_health_value(key, value):
+    """Parse scorecard annotation value to extract compliance levels."""
+    try:
+        levels = {}
+        
+        # Try to parse as JSON first
+        if isinstance(value, str) and (value.startswith('{') or value.startswith('[')):
+            try:
+                parsed_value = json.loads(value)
+                if isinstance(parsed_value, dict):
+                    for level_key, level_value in parsed_value.items():
+                        if level_value and str(level_value).lower() not in ['false', 'no', '0', 'none']:
+                            levels[level_key] = 'X'
+                elif isinstance(parsed_value, list):
+                    for i, level in enumerate(parsed_value):
+                        if level:
+                            levels[f'L{i+1}'] = 'X'
+            except json.JSONDecodeError:
+                pass
+        
+        # Handle simple string values
+        if not levels:
+            if str(value).lower() in ['true', 'yes', 'x', '1', 'pass', 'passing']:
+                levels.update(extract_levels_from_name(key))
+        
+        return levels
+        
+    except Exception as e:
+        print(f"    Error parsing annotation value: {e}")
+        return {}
+
+def print_health_summary(health_data):
+    """Print a summary of extracted health data."""
+    for category, levels in health_data.items():
+        if levels:
+            level_str = ', '.join([f"{k}: {v}" for k, v in levels.items()])
+            print(f"    {category}: {level_str}")
+
+def extract_scorecard_data_from_entity(entity_data, team_name):
+    """Extract scorecard categories from Backstage entity data (enhanced version)."""
+    if not entity_data:
+        return {}
+        
+    try:
+        # Check if this is enhanced format first
+        metadata = entity_data.get('metadata', {})
+        annotations = metadata.get('annotations', {})
+        
+        # Handle enhanced format
+        if 'enhanced-scorecard-data' in annotations:
+            try:
+                enhanced_data = json.loads(annotations['enhanced-scorecard-data'])
+                print(f"{Fore.CYAN}  Using enhanced scorecard data for {team_name}...{Style.RESET_ALL}")
+                return enhanced_data
+            except json.JSONDecodeError:
+                print("    Warning: Could not parse enhanced scorecard data")
+        
+        # Fall back to original parsing logic
+        print(f"{Fore.CYAN}  Processing scorecard data for {team_name}...{Style.RESET_ALL}")
+        
+        # Initialize category structure
+        categories = {
+            'Ownership': {},
+            'Quality': {},
+            'Security': {},
+            'Reliability': {}
+        }
+        
+        # Look for scorecard-related annotations
+        scorecard_found = False
+        for key, value in annotations.items():
+            if 'scorecard' in key.lower():
+                scorecard_found = True
+                print(f"    Found scorecard annotation: {key}")
+                
+                # Parse scorecard data based on key name
+                if 'ownership' in key.lower():
+                    categories['Ownership'] = parse_scorecard_levels(value)
+                elif 'quality' in key.lower():
+                    categories['Quality'] = parse_scorecard_levels(value)
+                elif 'security' in key.lower():
+                    categories['Security'] = parse_scorecard_levels(value)
+                elif 'reliability' in key.lower():
+                    categories['Reliability'] = parse_scorecard_levels(value)
+        
+        if not scorecard_found:
+            print(f"    No scorecard annotations found for {team_name}")
+        
+        return categories
+        
+    except Exception as e:
+        print(f"{Fore.RED}Error extracting scorecard data for {team_name}: {e}{Style.RESET_ALL}")
+        return {}
+
+def parse_scorecard_levels(scorecard_value):
+    """Parse scorecard level data from Backstage annotation value."""
+    try:
+        # If it's a JSON string, parse it
+        if isinstance(scorecard_value, str):
+            if scorecard_value.startswith('{') or scorecard_value.startswith('['):
+                scorecard_data = json.loads(scorecard_value)
+            else:
+                # Simple string value - treat as a single level
+                return {'L1': 'X'} if scorecard_value.lower() in ['true', 'yes', 'x', '1'] else {}
+        else:
+            scorecard_data = scorecard_value
+        
+        # Convert scorecard data to category format expected by ticket creation
+        levels = {}
+        
+        if isinstance(scorecard_data, dict):
+            # Handle different scorecard data structures
+            for level_key, level_value in scorecard_data.items():
+                if level_value and str(level_value).lower() not in ['false', 'no', '0', 'none']:
+                    levels[level_key] = 'X'
+        elif isinstance(scorecard_data, list):
+            # Handle list of levels
+            for i, level in enumerate(scorecard_data):
+                if level:
+                    levels[f'L{i+1}'] = 'X'
+        
+        return levels
+        
+    except Exception as e:
+        print(f"    Warning: Could not parse scorecard value: {e}")
+        return {}
+
+def get_team_categories_from_backstage(backstage_url, team_name, categories=None):
+    """Get all category data for a team from Backstage using enhanced extraction."""
+    # Use the enhanced health extraction directly
+    health_data = get_team_health_enhanced(backstage_url, team_name, categories)
+    
+    if not health_data:
+        return None
+        
+    # Filter out empty categories
+    filtered_categories = {}
+    for category_name, category_data in health_data.items():
+        if category_data:  # Only keep categories with data
+            filtered_categories[category_name] = category_data
+    
+    return filtered_categories if filtered_categories else None
 
 def validate_file(file_path):
     """Validate that the file exists and is an Excel file."""
@@ -466,8 +1881,8 @@ def log_issue_fields(issue_dict):
         elif field == 'issuetype':
             print(f"{Fore.CYAN}  issuetype: {value['name']}{Style.RESET_ALL}")
         elif field == 'description' and value:
-            # Show truncated description for readability
-            desc_preview = value[:100] + ('...' if len(value) > 100 else '')
+            # Show more description for better visibility in dry-run mode
+            desc_preview = value[:500] + ('...' if len(value) > 500 else '')
             print(f"{Fore.CYAN}  description: {desc_preview}{Style.RESET_ALL}")
         else:
             print(f"{Fore.CYAN}  {field}: {value}{Style.RESET_ALL}")
@@ -736,9 +2151,9 @@ def confirm_operation(args, sheet_count=None, issue_type=None):
     # Confirm before proceeding with actual ticket creation
     if args.create:
         if sheet_count is not None and sheet_count > 0:
-            confirm = input(f"\n{Fore.YELLOW}WARNING: This will create actual tickets in Jira from {sheet_count} sheets. Continue? (y/n): {Style.RESET_ALL}")
+            confirm = input(f"\n{Fore.YELLOW}WARNING: This will create actual tickets in Jira using Backstage data for {sheet_count} categories. Continue? (y/n): {Style.RESET_ALL}")
         else:
-            confirm = input(f"\n{Fore.YELLOW}WARNING: This will create actual tickets in Jira. Continue? (y/n): {Style.RESET_ALL}")
+            confirm = input(f"\n{Fore.YELLOW}WARNING: This will create actual tickets in Jira using Backstage data. Continue? (y/n): {Style.RESET_ALL}")
         
         if confirm.lower() != 'y':
             print(f"{Fore.RED}Operation cancelled by user.{Style.RESET_ALL}")
@@ -912,7 +2327,13 @@ def display_ticket_details(key, summary, description, project_key, additional_fi
     
     # Show description preview if available
     if description:
-        print(f"{Fore.BLUE}  Description: {description[:100]}{'...' if len(description) > 100 else ''}{Style.RESET_ALL}")
+        # Show full description in dry-run mode for better visibility
+        if is_dry_run:
+            print(f"{Fore.BLUE}  Description: {description}{Style.RESET_ALL}")
+        else:
+            # For actual creation, show truncated version to keep logs clean
+            desc_preview = description[:200] + ('...' if len(description) > 200 else '')
+            print(f"{Fore.BLUE}  Description: {desc_preview}{Style.RESET_ALL}")
     
     # Show epic information
     display_epic_info(additional_fields, is_dry_run)
@@ -1428,7 +2849,7 @@ def filter_team_mapping(team_mapping, args):
     return filtered_mapping
 
 def process_all_sheets(args, file_path, available_sheets, jira_client, default_issue_type, team_mapping, priority=None):
-    """Process all the sheets from the Excel file."""
+    """Process teams using Backstage API instead of Excel category sheets."""
     all_created_tickets = []
     all_skipped_tickets = []
     total_dry_run_count = 0
@@ -1438,6 +2859,19 @@ def process_all_sheets(args, file_path, available_sheets, jira_client, default_i
     if CUSTOM_FIELDS_SHEET in available_sheets:
         custom_fields_mapping = read_custom_fields_mapping(file_path)
     
+    # Read Excel config to get Backstage URL and categories
+    excel_config = read_config_sheet(file_path)
+    backstage_url = get_backstage_url_from_config(excel_config)
+    categories = get_categories_from_config(excel_config)
+    
+    if not backstage_url:
+        print(f"{Fore.RED}Error: Backstage URL not found in Config sheet.{Style.RESET_ALL}")
+        print(f"{Fore.RED}Please add a 'Backstage' key with the base URL (e.g., https://backstage.core.cvent.org) to the Config sheet.{Style.RESET_ALL}")
+        return all_created_tickets, all_skipped_tickets, total_dry_run_count
+    
+    print(f"{Fore.CYAN}Using Backstage URL: {backstage_url}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Will process categories: {', '.join(categories)}{Style.RESET_ALL}")
+    
     # Filter teams based on arguments
     filtered_team_mapping = filter_team_mapping(team_mapping, args)
     
@@ -1445,19 +2879,171 @@ def process_all_sheets(args, file_path, available_sheets, jira_client, default_i
     display_team_projects(filtered_team_mapping)
     display_team_issue_types(filtered_team_mapping)
     
-    for sheet_name in SHEET_NAMES:
-        if sheet_name in available_sheets:
-            created, skipped, dry_run_count = process_sheet(
-                args, file_path, sheet_name, jira_client, default_issue_type, filtered_team_mapping, priority, 
-                custom_fields_mapping
-            )
-            all_created_tickets.extend(created)
-            all_skipped_tickets.extend(skipped)
-            total_dry_run_count += dry_run_count
+    print(f"\n{Fore.CYAN}Processing teams with Backstage integration...{Style.RESET_ALL}")
+    
+    # Process each team using Backstage data
+    for team_name, team_config in filtered_team_mapping.items():
+        print(f"\n{Fore.CYAN}=== Processing team: {team_name} ==={Style.RESET_ALL}")
+        
+        # Get team's scorecard data from Backstage using configured categories
+        team_categories = get_team_categories_from_backstage(backstage_url, team_name, categories)
+        
+        if team_categories:
+            # Process each category that has data
+            for category_name, category_data in team_categories.items():
+                print(f"\n{Fore.CYAN}Processing category: {category_name} for team {team_name}{Style.RESET_ALL}")
+                
+                # Create tickets for this team/category combination
+                created, skipped, dry_run_count = process_team_category_from_backstage(
+                    args, team_name, category_name, category_data, team_config, 
+                    jira_client, default_issue_type, priority, custom_fields_mapping
+                )
+                
+                all_created_tickets.extend(created)
+                all_skipped_tickets.extend(skipped)
+                total_dry_run_count += dry_run_count
         else:
-            print(f"{Fore.YELLOW}Warning: Sheet '{sheet_name}' not found in the Excel file, skipping.{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}No scorecard data found for team: {team_name}{Style.RESET_ALL}")
+            # Count as skipped
+            all_skipped_tickets.append(f"{team_name} (No Backstage data)")
     
     return all_created_tickets, all_skipped_tickets, total_dry_run_count
+
+def process_team_category_from_backstage(args, team_name, category_name, category_data, team_config, 
+                                        jira_client, default_issue_type, priority, custom_fields_mapping):
+    """Process a single team/category combination from Backstage data."""
+    created_tickets = []
+    skipped_tickets = []
+    dry_run_count = 0
+    
+    try:
+        # Prepare ticket data similar to existing logic
+        summary = f"{team_name} Scorecards Improvement: {category_name}"
+        
+        # Build detailed description from compliance analysis
+        description = f"*Backstage Scorecards Category:* {category_name}\n\n"
+        
+        if category_data and isinstance(category_data, dict):
+            # Handle new detailed compliance analysis format
+            if 'current_level' in category_data:
+                current_level = category_data.get('current_level', 'L0')
+                improvement_details = category_data.get('improvement_details', [])
+                
+                description += f"*Current Compliance Level:* {current_level}\n\n"
+                
+                if improvement_details:
+                    total_opportunities = len(improvement_details)
+                    description += f"*Improvement Opportunities:* ({total_opportunities} total)\n\n"
+                    
+                    # Group improvement details by level
+                    grouped_by_level = {}
+                    for detail in improvement_details:
+                        level_category = detail.get('level_category', 'L1')
+                        if level_category not in grouped_by_level:
+                            grouped_by_level[level_category] = []
+                        grouped_by_level[level_category].append(detail)
+                    
+                    # Sort levels (L1, L2, L3, L4, etc.)
+                    sorted_levels = sorted(grouped_by_level.keys(), key=lambda x: (len(x), x))
+                    
+                    # Generate description grouped by level
+                    for level_category in sorted_levels:
+                        level_details = grouped_by_level[level_category]
+                        description += f"**{level_category} Issues:**\n"
+                        
+                        for detail in level_details:
+                            level = detail['level']
+                            level_name = detail['level_name']
+                            threshold = detail['threshold']
+                            current_count = detail['current_count']
+                            total_count = detail['total_count']
+                            needed_count = detail['needed_count']
+                            percentage = detail['percentage']
+                            
+                            # Enhanced description based on analysis type
+                            if category_data.get('analysis_type') == 'specific_failures':
+                                check_id = detail.get('check_id', '')
+                                state = detail.get('state', 'failed')
+                                target = detail.get('target', {})
+                                
+                                description += f"  • **{level_name}**:\n"
+                                description += f"    - Check: `{check_id}`\n"
+                                description += f"    - Status: {state.upper()}\n"
+                                description += f"    - Current: {current_count}/{total_count} components ({percentage:.0f}%)\n"
+                                
+                                if target:
+                                    target_range = f"{target.get('lower', '??')}-{target.get('upper', '??')}%"
+                                    description += f"    - Target: {target_range}\n"
+                                
+                                if needed_count > 0:
+                                    description += f"    - **Action Required**: Fix {needed_count} additional component{'s' if needed_count != 1 else ''}\n"
+                                description += "\n"
+                            else:
+                                # Traditional level-based or synthetic description
+                                description += f"  • **{level_name}** - {threshold}:\n"
+                                description += f"    - Current: {current_count}/{total_count} components ({percentage}%)\n"
+                                description += f"    - Need to improve: {needed_count} additional components\n\n"
+                        
+                        description += "\n"  # Extra spacing between level groups
+                else:
+                    description += "Team is at maximum compliance level for this category.\n"
+            else:
+                # Handle legacy format for backward compatibility
+                description += "*Address the Following Compliance Level(s):*\n"
+                for level, value in category_data.items():
+                    if value:
+                        description += f"* {level}: {value}\n"
+        else:
+            description += "No specific compliance levels identified.\n"
+        
+        # Get team configuration
+        project_key = team_config.get('Project')
+        if not project_key:
+            print(f"{Fore.YELLOW}Skipping {team_name} - no Project specified{Style.RESET_ALL}")
+            skipped_tickets.append(f"{team_name}_{category_name}")
+            return created_tickets, skipped_tickets, dry_run_count
+        
+        # Determine issue type
+        issue_type = team_config.get('Issue Type', default_issue_type)
+        
+        # Prepare additional fields from team config
+        additional_fields = {}
+        for field_name, field_value in team_config.items():
+            if field_name not in ['Project', 'Issue Type'] and field_value:
+                additional_fields[field_name] = field_value
+        
+        # Add priority if specified
+        if priority:
+            additional_fields['Priority'] = priority
+        
+        # Create the ticket
+        if args.create:
+            ticket = create_single_ticket(
+                jira_client, project_key, issue_type, team_name, summary, description, 
+                additional_fields, args.create, excel_file=None, custom_fields_mapping=custom_fields_mapping
+            )
+            if ticket:
+                created_tickets.append(ticket)
+                print(f"{Fore.GREEN}Created ticket: '{ticket.ticket_id} - {summary}' for key '{team_name}' in project {project_key} as issue type '{issue_type}'{Style.RESET_ALL}")
+            else:
+                skipped_tickets.append(f"{team_name}_{category_name}")
+        else:
+            # Dry run mode
+            dry_run_count += 1
+            simulated_ticket_id = f"simulated-{project_key}-{dry_run_count}"
+            ticket = TicketInfo(simulated_ticket_id, summary)
+            created_tickets.append(ticket)
+            
+            print(f"{Fore.YELLOW}[DRY RUN] Would create ticket: '{summary}' for key '{team_name}' in project {project_key} as issue type '{issue_type}'{Style.RESET_ALL}")
+            print(f"  Description: {description}")
+            if 'Epic Link' in additional_fields:
+                print(f"  Would link to parent epic: {additional_fields['Epic Link']}")
+    
+    except Exception as e:
+        print(f"{Fore.RED}Error processing {team_name} - {category_name}: {e}{Style.RESET_ALL}")
+        skipped_tickets.append(f"{team_name}_{category_name}")
+    
+    return created_tickets, skipped_tickets, dry_run_count
 
 def display_filter_info(args):
     """Generate filter info string based on arguments."""
@@ -1602,11 +3188,15 @@ def main():
         if nonexistent_teams:
             print(f"{Fore.YELLOW}Warning: Some excluded teams not found in Teams sheet: {', '.join(nonexistent_teams)}{Style.RESET_ALL}")
     
-    # Count available sheets for processing
-    available_sheet_count = sum(1 for sheet in SHEET_NAMES if sheet in available_sheets)
+    # Since we're using Backstage, we'll process all teams for all categories
+    # Count teams for processing information
+    team_count = len(team_mapping)
+    category_count = len(SHEET_NAMES)  # Ownership, Quality, Security, Reliability
+    
+    print(f"{Fore.CYAN}Will query Backstage for {team_count} teams across {category_count} categories{Style.RESET_ALL}")
     
     # Confirm operation with user
-    issue_type = confirm_operation(args, available_sheet_count, issue_type)
+    issue_type = confirm_operation(args, category_count, issue_type)
     if not issue_type:
         return
     

@@ -1,7 +1,21 @@
 # Standard Ticket Creator Documentation
 
 ## Overview
-The `standardTicketCreator.py` script automates the creation of standardized Jira tickets from data stored in an Excel file. It's designed to streamline the process of creating multiple tickets across various categories, with consistent formatting and proper linking to parent epics.
+The `standardTicketCreator.py` script automates the creation of standardized Jira tickets by integrating directly with Backstage to retrieve real-time team scorecard data. It analyzes actual compliance levels across categories (Ownership, Quality, Security, Reliability) and creates tickets only for teams that have genuine scorecard improvement opportunities. Team configuration (projects, assignees, epics) is managed through an Excel file, while all scorecard data comes directly from Backstage's SoundCheck API.
+
+**Key Features:**
+- **Real-time Analysis**: Queries live Backstage scorecard data via GraphQL API instead of static Excel sheets
+- **Track-Based Categorization**: Uses `track_name` field to ensure accurate category assignment without cross-contamination
+- **Intelligent Filtering**: Only creates tickets for categories with actual compliance gaps
+- **Level-Based Grouping**: Organizes improvement opportunities by compliance level (L1, L2, L3, L4) with total counts
+- **Detailed Descriptions**: Provides specific improvement guidance with current vs. target metrics
+- **Accurate Level Detection**: Uses actual `backstage_level` field from Backstage data
+
+**Important Terminology:**
+- **Category Sheets**: Previously separate Excel sheets named "Ownership", "Quality", "Security", "Reliability" that contained team scorecard data (now eliminated - data comes from Backstage GraphQL API)
+- **CustomFields Sheet**: Optional Excel sheet for mapping Jira field names to custom field IDs (still supported and useful for Jira API compatibility)
+- **Track Name**: Field from GraphQL API that categorizes each check into Quality, Security, Ownership, or Reliability
+- **Backstage Level**: Field from GraphQL API indicating compliance level (L0, L1, L2, L3, L4) for each check
 
 ## Requirements
 
@@ -12,14 +26,24 @@ The `standardTicketCreator.py` script automates the creation of standardized Jir
   - pandas
   - openpyxl
   - colorama
+  - requests
 
 You can install these dependencies with:
 ```bash
-pip install jira pandas openpyxl colorama
+pip install jira pandas openpyxl colorama requests
 ```
 
 ### Jira Configuration
 The script uses your Jira credentials from the `jiraToolsConfig.py` file. Make sure this file is properly configured with your Jira instance details.
+
+### Backstage Integration
+The script integrates directly with Backstage's SoundCheck API to retrieve real-time scorecard data:
+- **Live Scorecard Analysis**: Queries `/api/soundcheck/results` endpoint for actual team compliance data
+- **Intelligent Processing**: Only considers rollup checks (team-level scorecards), not individual entity issues
+- **Accurate Level Detection**: Determines current compliance level (L1, L2, L3, L4) based on actual performance
+- **Smart Ticket Creation**: Only creates tickets for categories with genuine improvement opportunities
+- **Team Mapping**: Uses team names from Excel Teams sheet to query corresponding Backstage entities
+- **No Authentication**: Currently assumes Backstage API is accessible without authentication
 
 ## Usage
 
@@ -75,7 +99,7 @@ python standardTicketCreator.py team_ticket_defaults.xlsx -c --processTeams "Tea
 This section walks through a complete workflow example:
 
 1. **Prepare Excel File**:
-   Create an Excel file with Teams sheet and category tabs (see structure below).
+   Create an Excel file with Config sheet (including Backstage URL) and Teams sheet.
 
 2. **Run in Dry Run Mode**:
    ```bash
@@ -84,10 +108,29 @@ This section walks through a complete workflow example:
 
 3. **Review Output**:
    ```
-   [DRY RUN] Would create ticket: 'Ownership: TeamA' for key 'TeamA' in project RND
-     Description: *L Categories:*
-   L1: X, L3: X
-     Would link to parent epic: RND-12345
+   [DRY RUN] Would create ticket: 'Analytics Scorecards Improvement: Quality' for key 'Analytics' in project ANL
+     Description: *Backstage Scorecards Category:* Quality
+
+   *Current Compliance Level:* L2
+
+   *Improvement Opportunities:* (4 total)
+
+   **L1 Issues:**
+     • **SonarQube Code Coverage (30%)** - 4/28 (14%):
+       - Current: 4/28 components (14%)
+       - Need to improve: 24 additional components
+
+   **L3 Issues:**
+     • **SonarQube Code Coverage (70%)** - 3/28 (11%):
+       - Current: 3/28 components (11%)
+       - Need to improve: 25 additional components
+
+   **L4 Issues:**
+     • **SonarQube Code Coverage (90%)** - 1/28 (4%):
+       - Current: 1/28 components (4%)
+       - Need to improve: 27 additional components
+
+     Would link to parent epic: ANL-4096
    ```
 
 4. **Make Any Necessary Adjustments** to your Excel file.
@@ -106,9 +149,12 @@ The script expects a specific structure in the Excel file:
 
 ### Required Sheets
 
-1. **Teams**: Contains team information including Project, Epic Link, and Issue Type details
-2. **Config**: Contains configuration settings like Priority
-3. **Ownership**, **Quality**, **Security**, **Reliability**: These are the standard tabs that the script processes
+1. **Config**: Contains configuration settings like Priority and Backstage URL (required)
+2. **Teams**: Contains team information including Project, Epic Link, and Issue Type details (required)
+
+**Important**: The script no longer requires category sheets (separate Excel sheets named "Ownership", "Quality", "Security", "Reliability" that previously contained team scorecard data) in Excel. All scorecard data is retrieved directly from Backstage's SoundCheck API in real-time, ensuring accuracy and eliminating the need to manually maintain category data in spreadsheets.
+
+**Note**: The optional "CustomFields" sheet is still supported and is different from category sheets - it maps Jira field names to custom field IDs for API compatibility.
 
 ### Optional Sheets
 
@@ -124,6 +170,8 @@ Your Excel file should have the following sheets and formats:
 | Key | Value |
 |-----|-------|
 | Priority | 4-Medium |
+| Backstage | https://backstage.core.cvent.org |
+| Categories | Ownership, Quality, Security, Reliability |
 
 #### CustomFields Sheet (Optional)
 | Field Name | Custom Field ID | Data Wrapper |
@@ -147,35 +195,9 @@ This flexibility allows compatibility with different Jira custom field formats.
 | TeamB | msmith | DEV | DEV-56789 | Task | | | Frontend |
 | TeamC | rjones | QA | QA-34567 | Bug | 29312 | Platform Sprint 5 | |
 
-#### Ownership Sheet
-| Team | L1 | L2 | L3 |
-|------|----|----|-----|
-| TeamA | X |   | X |
-| TeamB |   | X |   |
-| TeamC | X | X |   |
+**Important**: Category sheets (separate Excel sheets previously named "Ownership", "Quality", "Security", "Reliability" that contained team scorecard data) are completely eliminated from the Excel file. All scorecard data is retrieved in real-time from Backstage's SoundCheck API, providing accurate, up-to-date compliance information and intelligent ticket creation based on actual team performance.
 
-#### Quality Sheet
-| Team | Q1 | Q2 | Q3 |
-|------|----|----|-----|
-| TeamA |   | X |   |
-| TeamB | X |   | X |
-| TeamC |   | X |   |
-
-#### Security Sheet
-| Team | S1 | S2 | S3 |
-|------|----|----|-----|
-| TeamA | X |   |   |
-| TeamB |   | X | X |
-| TeamC |   |   | X |
-
-#### Reliability Sheet
-| Team | R1 | R2 | R3 |
-|------|----|----|-----|
-| TeamA |   | X | X |
-| TeamB | X |   |   |
-| TeamC | X | X |   |
-
-Note: The exact category columns (L1, L2, Q1, S1, etc.) can vary based on your needs. What's important is that the first column in each category tab matches the team names from the Teams sheet.
+**Note**: The optional "CustomFields" sheet (for mapping Jira field names to custom field IDs) is still supported and remains useful for Jira API compatibility.
 
 
 
@@ -190,13 +212,16 @@ Available keys:
 | Key | Example Value | Description |
 |-----|---------------|-------------|
 | Priority | 4-Medium | The priority to set for all created tickets (e.g., "3-High", "4-Medium", "5-Low") |
+| Backstage | https://backstage.core.cvent.org | The base URL for your Backstage instance (required for scorecard data integration) |
+| Categories | Ownership, Quality, Security, Reliability | Comma-separated list of categories to process for ticket creation |
 
 Example format:
 
 | Key | Value |
 |-----|-------|
-| Issue Type | Story |
-| Priority | High |
+| Priority | 4-Medium |
+| Backstage | https://backstage.core.cvent.org |
+| Categories | Ownership, Quality, Security, Reliability |
 
 ### Teams Sheet
 
@@ -236,6 +261,7 @@ Each team should have a unique name in the Sprint Team column as this is used to
 6. **Sprint Field**: The Sprint column is optional; when provided, tickets will be assigned to the specified sprint using the numeric Sprint ID (e.g., 29311, not "Sprint 42")
 7. **Sprint Name Column**: The Sprint Name column is for convenience/reference only and is not processed by the script - use the Sprint column for actual sprint assignment
 8. **Component Field**: The Component column is optional; when provided, tickets will be assigned to the specified component name (e.g., "Backend", "Frontend")
+9. **Team Health Automation**: Team names are automatically used to query Backstage for scorecard/health data - ensure team names match your Backstage entity names for automatic data extraction
 
 ### Special Field Requirements
 
@@ -277,53 +303,115 @@ The Component field is a standard Jira field with specific requirements:
 #### Epic Link Field
 Epic Link is handled automatically for most Jira instances, but may require CustomFields mapping in some configurations.
 
-### Category Tabs (Ownership, Quality, Security, Reliability)
+### Backstage Integration Details
 
-Each category tab should follow this format:
+The script retrieves scorecard data directly from Backstage using GraphQL API for comprehensive and accurate track data:
 
-1. First column: Team identifier (matches the "Sprint Team" column from the Teams sheet)
-2. Subsequent columns: Category fields (e.g., L1, L2, L3, etc.)
+#### Real-Time Scorecard Analysis
 
-Example format for a category tab:
+The script uses Backstage's SoundCheck GraphQL API to analyze actual team compliance data:
 
-| Team | L1 | L2 | L3 |
-|------|----|----|-----|
-| TeamA | X | | X |
-| TeamB | | X | |
-| TeamC | X | X | |
+1. **Primary API**: Uses `/api/soundcheck/graphql` with `getAllCertifications` query for comprehensive track data
+2. **Track-Based Filtering**: Uses `track_name` field from GraphQL response to categorize checks (Quality, Security, Ownership, Reliability)
+3. **Level Detection**: Automatically determines current compliance level (L1, L2, L3, L4) from actual check results using `backstage_level` field
+4. **Gap Analysis**: Identifies specific improvement opportunities with detailed metrics, grouped by compliance level
+5. **Fallback APIs**: Falls back to REST API `/api/soundcheck/results` if GraphQL is unavailable
 
-Place an "X" or any non-empty value in cells to indicate selections. For each team with at least one selection in a category tab, a ticket will be created in the corresponding project with these categories listed in the description.
+#### Supported Health Categories
+
+The enhanced extraction automatically detects and processes:
+
+- **Ownership**: Team ownership, maintainer, and responsibility metrics
+- **Quality**: Code quality, test coverage, SonarQube integration, linting results
+- **Security**: Security scans, vulnerability assessments, authentication checks
+- **Reliability**: Uptime, SLA compliance, monitoring, alerting configurations
+
+#### Intelligent Compliance Level Detection
+
+The system performs sophisticated analysis of actual Backstage scorecard data:
+
+- **Real-Time Analysis**: Processes live GraphQL certification data to determine current compliance levels
+- **Track-Based Categorization**: Uses `track_name` field to ensure each check appears only in its correct category (Quality, Security, Ownership, Reliability)
+- **Level Mapping**: Uses `backstage_level` field from GraphQL response to accurately map checks to compliance levels (L1, L2, L3, L4)
+- **Current vs. Target**: Determines highest passed level and identifies improvement opportunities for higher levels
+- **Detailed Metrics**: Extracts component counts and percentages from check results for specific improvement guidance
+- **Grouped Output**: Organizes improvement opportunities by level, with total count of issues displayed at the top
+
+#### Smart API Integration
+
+The system uses a focused approach for maximum accuracy and performance:
+
+1. **Primary**: `/api/soundcheck/graphql` with `getAllCertifications` query - Comprehensive track-level compliance data with definitive category assignment via `track_name` field
+2. **Fallback**: `/api/soundcheck/results?entityRef=group:default/{team-name}` - REST API for backward compatibility
+3. **Catalog**: `/api/catalog/entities/by-name/group/default/{team-name}` - Team entity information (if needed)
+
+The GraphQL API provides the most accurate and up-to-date scorecard information with proper track categorization, ensuring each check appears only in its correct category (Quality, Security, Ownership, or Reliability) based on the `track_name` field from Backstage.
 
 ## Ticket Creation Logic
 
 ### How It Works
 
-For each team in each category tab (Ownership, Quality, Security, Reliability):
+For each team in the Teams sheet, the script:
 
-1. If the team has any marked categories (cells with "X" or any value):
-   - A ticket is created in the team's specified Jira project (from "Project" column)
-   - The summary is formatted as "[Team Name] Scorecards Improvement: [Tab Name]" (e.g., "Analytics Scorecards Improvement: Ownership")
-   - The description includes the tab name (e.g., "Category: Ownership") and the selected categories
+1. **Analyzes Live Data**: Queries Backstage GraphQL API (`getAllCertifications`) to get real-time certification data with track information
+2. **Categorizes by Track**: Uses `track_name` field to accurately assign checks to categories (Quality, Security, Ownership, Reliability)
+3. **Determines Current Level**: Uses `backstage_level` field to identify the team's current compliance level (L1, L2, L3, L4) for each category
+4. **Identifies Gaps**: Only processes categories with actual improvement opportunities (failing higher-level checks)
+5. **Creates Intelligent Tickets**: For categories needing improvement:
+   - Creates a ticket in the team's specified Jira project (from "Project" column)
+   - The summary is formatted as "[Team Name] Scorecards Improvement: [Category Name]" (e.g., "Analytics Scorecards Improvement: Quality")
+   - The description shows current level and specific improvement targets grouped by level with total count
    - The ticket is linked to the specified epic in the "Epic Link" column
    - The ticket is assigned to the person in the "Assignee" column
-
-2. If a team has no selections in a category tab, no ticket will be created for that team in that category
+6. **Skips Maximum Compliance**: If a team is already at maximum compliance level for a category, no ticket is created
 
 ### Key Features
 
+- **Real-Time GraphQL Analysis**: Uses live Backstage GraphQL API data with track categorization instead of static Excel sheets
+- **Track-Based Filtering**: Uses `track_name` field to prevent cross-category contamination (e.g., SonarQube checks appear only in their correct category)
+- **Data-Driven Levels**: Uses actual `backstage_level` field from Backstage instead of hardcoded logic
+- **Level-Based Grouping**: Organizes improvement opportunities by compliance level with total count header
+- **Intelligent Filtering**: Only creates tickets for genuine compliance gaps, not teams already at maximum levels
+- **Detailed Descriptions**: Provides specific improvement guidance with current vs. target metrics grouped by level
+- **Accurate Level Detection**: Shows current compliance level and what's needed for higher levels
 - **Automatic Epic Linking**: All tickets are automatically linked to their parent epics
 - **Team-Specific Projects**: Each team can have its own Jira project
-- **Category Grouping**: Related categories (like L1, L2, L3) are grouped in the description
-- **Selective Creation**: Only creates tickets for teams with actual category selections
+- **Component-Level Details**: Shows exactly how many components need improvement for each level
 
-### Category Grouping
+### Detailed Improvement Descriptions
 
-When a team has selections in multiple categories, they're grouped in the description by their type:
+Ticket descriptions provide specific, actionable guidance for each compliance level, organized by level with a total count:
 
 ```
-*L Categories:*
-L1: X, L3: X
+*Current Compliance Level:* L2
+
+*Improvement Opportunities:* (7 total)
+
+**L2 Issues:**
+  • **Sonar Integration** - 21/25 (84%):
+    - Current: 21/25 components (84%)
+    - Need to improve: 4 additional components
+
+**L3 Issues:**
+  • **SonarQube Code Coverage (70%)** - 3/28 (11%):
+    - Current: 3/28 components (11%)
+    - Need to improve: 25 additional components
+
+  • **Tech Docs** - 11/28 (39%):
+    - Current: 11/28 components (39%)
+    - Need to improve: 17 additional components
+
+**L4 Issues:**
+  • **SonarQube Code Coverage (90%)** - 1/28 (4%):
+    - Current: 1/28 components (4%)
+    - Need to improve: 27 additional components
 ```
+
+This format clearly shows:
+- Total count of improvement opportunities at the top
+- Issues grouped by compliance level (L1, L2, L3, L4)
+- Specific check names with current compliance percentages
+- Exact component counts and improvement targets
 
 ### Ticket Linking
 
@@ -356,8 +444,9 @@ The script provides detailed output:
 ### Ticket Creation Issues
 
 4. **No tickets created**:
-   - Symptom: Script runs but shows "Skipping ticket" messages
-   - Solution: Check if teams have category selections in the tabs (non-empty cells)
+   - Symptom: Script runs but shows "At maximum compliance level - no improvement needed"
+   - This is normal behavior: The script only creates tickets for teams with actual compliance gaps
+   - If teams are already at maximum compliance levels, no tickets will be created (this is correct)
    - Also check if you've used `--processTeams` with incorrect team names or `--excludeTeams` that exclude all teams
 
 5. **Missing Project field**:
@@ -414,10 +503,15 @@ The script provides detailed output:
 
 ## Additional Notes
 
-- Non-empty cells in category columns indicate selection
-- Teams without any category selections are skipped
+- **No Excel Category Sheets Required**: All scorecard data comes from Backstage GraphQL API in real-time
+- **Track-Based Categorization**: Uses `track_name` field for accurate category assignment, preventing issues like SonarQube checks appearing in multiple categories
+- **Data-Driven Implementation**: Uses actual `backstage_level` field from Backstage instead of hardcoded level logic
+- **Intelligent Ticket Creation**: Teams at maximum compliance levels will not have tickets created (this is correct behavior)
+- **Accurate Analysis**: GraphQL certifications API provides comprehensive track-level data with definitive category assignment
+- **Level-Based Organization**: Improvement opportunities are grouped by compliance level (L1, L2, L3, L4) with total counts
+- **Detailed Guidance**: Ticket descriptions provide specific component counts and improvement targets organized by level
+- **Team filtering parameters** (`--processTeams` and `--excludeTeams`) can be used to process a subset of teams
 - The script automatically handles different Jira configurations for epic linking
-- Team filtering parameters (`--processTeams` and `--excludeTeams`) can be used to process a subset of teams
 
 ## CustomFields Sheet
 
@@ -452,7 +546,7 @@ Example:
 
 ### How It Works
 
-When a field name in your Teams sheet or category sheets matches an entry in the CustomFields sheet:
+When a field name in your Teams sheet matches an entry in the CustomFields sheet:
 
 1. The script will automatically use the corresponding custom field ID when creating the ticket
 2. The value will be formatted based on the Data Wrapper column:
@@ -511,13 +605,17 @@ This special handling ensures that ticket assignments work reliably across diffe
 
 ### Common Mistakes to Avoid
 
-1. **Inconsistent Team Names**: Ensure team names in the category tabs exactly match the "Sprint Team" column in the Teams sheet
+1. **No Category Sheets Needed**: Don't create separate Excel sheets named "Ownership", "Quality", "Security", or "Reliability" for scorecard data - they are ignored and all scorecard data comes from Backstage (the optional "CustomFields" sheet for Jira field mapping is still supported)
 
-2. **Missing Projects**: Every team must have a Project value in the Teams sheet
+2. **Team Names in Backstage**: Ensure team names in the Teams sheet match the entity names in Backstage (case-insensitive matching is supported)
 
-3. **Invalid Epic Keys**: Make sure Epic Link values are valid Jira issue keys
+3. **Missing Projects**: Every team must have a Project value in the Teams sheet
 
-4. **Special Characters**: Avoid using special characters in team names
+4. **Invalid Epic Keys**: Make sure Epic Link values are valid Jira issue keys
+
+5. **Expecting Tickets for Compliant Teams**: If teams are already at maximum compliance levels, no tickets will be created (this is correct behavior)
+
+6. **Special Characters**: Avoid using special characters in team names
 
 ## Best Practices and Common Use Cases
 
@@ -587,12 +685,22 @@ python standardTicketCreator.py teams.xlsx -i Story -c
 
 ## Version History
 
+### Version 2.0 (October 2025) - Major Release
+- **BREAKING CHANGE**: Eliminated Excel category sheets (separate "Ownership", "Quality", "Security", "Reliability" sheets) - all scorecard data now comes from Backstage SoundCheck GraphQL API
+- **GraphQL Integration**: Primary integration with `/api/soundcheck/graphql` using `getAllCertifications` query for comprehensive track data
+- **Track-Based Categorization**: Uses `track_name` field from GraphQL response to ensure accurate category assignment and prevent cross-category contamination
+- **Data-Driven Levels**: Uses actual `backstage_level` field from Backstage instead of hardcoded level logic
+- **Level-Based Grouping**: Organizes improvement opportunities by compliance level (L1, L2, L3, L4) with total count header
+- **Intelligent Filtering**: Only creates tickets for teams with actual compliance gaps
+- **Detailed Descriptions**: Added specific improvement guidance with current vs. target metrics grouped by level
+- **Accurate Level Detection**: Determines current compliance level and shows improvement opportunities based on actual Backstage data
+
 ### Version 1.1 (October 2025)
 - Added support for CustomFields sheet to map field names to Jira custom field IDs
 - Fixed issue with Sprint Team field not being properly passed to the Jira API
 - Improved error handling and logging for API requests
 
 ### Version 1.0 (Initial Release)
-- Base functionality for creating tickets from Excel data
-- Support for Teams, Config, and category sheets
+- Base functionality for creating tickets from Excel data with static category sheets (separate "Ownership", "Quality", "Security", "Reliability" sheets)
+- Support for Teams, Config, and manual category sheets for scorecard data
 - Team filtering with --processTeams and --excludeTeams parameters

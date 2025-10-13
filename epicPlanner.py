@@ -1,6 +1,6 @@
 # This was created with Google Gemini, with prompting for various features and fixes.
 
-# pip install colorama | jira | networkx
+# pip install colorama jira networkx
 
 import argparse
 from colorama import init,Fore,Back,Style

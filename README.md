@@ -10,6 +10,7 @@ Useful Stuff for working with Jira
 1. `populateRemainingEstimate.py`: After `pointsToHours.py`, this will copy OriginalEstimate -> Remaining.
 1. `subtasksUserDifferentParentOwner.py`: Finds user contributions on subtasks when parent tickets owned by someone else
 1. `standardTicketCreator.py`: Creates standard Jira tickets from an Excel file with team and category data
+1. `teamApplicationAttribution.py`: Queries Backstage for all teams and their owned applications (type=application only), outputs a JSON mapping
 
 ## Documentation:
 - [Standard Ticket Creator Documentation](standardTicketCreator_documentation.md)

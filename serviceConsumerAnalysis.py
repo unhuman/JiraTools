@@ -7,10 +7,25 @@ from teamApplicationAttribution.py and queries Datadog to find which services ar
 calling each team's applications, then generates reports aggregated by domain and system.
 
 Usage:
-    python serviceConsumerAnalysis.py <input_file> <environment> <datadog_host> --api-key API_KEY --app-key APP_KEY [options]
+    python serviceConsumerAnalysis.py <input_file> <environment> <datadog_host> [auth_options] [filters]
 
-Example:
-    python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --api-key YOUR_API_KEY --app-key YOUR_APP_KEY -t TeamName
+Authentication (choose one):
+    --api-key KEY --app-key KEY    Use API key authentication
+    --cookies COOKIES              Use cookie-based authentication (semicolon separated)
+
+Optional Filters:
+    -t, --team TEAM                Process only this team
+    -a, --application APP          Process only this application
+
+Examples:
+    # Using API keys, filter to one team
+    python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --api-key YOUR_API_KEY --app-key YOUR_APP_KEY -t Oktagon
+    
+    # Using cookie authentication, filter to one application
+    python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --cookies "_dd_did=...; datadog-theme=light; dogweb=..." -a iam-service
+    
+    # Filter to both team and application
+    python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --cookies "..." -t Oktagon -a iam-service
 """
 
 import argparse
@@ -27,25 +42,32 @@ init(autoreset=True)
 
 
 class DatadogClient:
-    """Client for interacting with Datadog API using API key and application key authentication."""
+    """Client for interacting with Datadog API with flexible authentication."""
     
-    def __init__(self, host: str, api_key: str, app_key: str, timeout: int = 30, rate_limit_delay: float = 0.5):
+    def __init__(self, host: str, api_key: Optional[str] = None, app_key: Optional[str] = None, 
+                 cookies: Optional[str] = None, timeout: int = 30, rate_limit_delay: float = 1.0):
         """
-        Initialize Datadog client.
+        Initialize Datadog client with either API keys or cookie authentication.
         
         Args:
-            host: Datadog host URL (e.g., https://app.datadoghq.com)
-            api_key: Datadog API key
-            app_key: Datadog application key
+            host: Datadog site URL (e.g., 'https://app.datadoghq.com')
+            api_key: Datadog API key (optional if cookies provided)
+            app_key: Datadog application key (optional if cookies provided)
+            cookies: Cookie string (semicolon separated) for authentication (optional if API keys provided)
             timeout: Request timeout in seconds
-            rate_limit_delay: Delay between requests in seconds to avoid rate limits
+            rate_limit_delay: Delay between requests in seconds
         """
         self.host = host.rstrip('/')
         self.api_key = api_key
         self.app_key = app_key
+        self.cookies = cookies
         self.timeout = timeout
         self.rate_limit_delay = rate_limit_delay
         self.last_request_time = 0
+        
+        # Validate that we have some form of authentication
+        if not ((api_key and app_key) or cookies):
+            print(f"{Fore.YELLOW}Warning: No authentication provided{Style.RESET_ALL}")
         
     def _rate_limit(self):
         """Apply rate limiting between requests."""
@@ -56,12 +78,20 @@ class DatadogClient:
         self.last_request_time = time.time()
     
     def _get_headers(self) -> Dict[str, str]:
-        """Get headers for Datadog authentication."""
-        return {
+        """Get headers for authentication based on available credentials."""
+        headers = {
             'Content-Type': 'application/json',
-            'DD-API-KEY': self.api_key,
-            'DD-APPLICATION-KEY': self.app_key
         }
+        
+        if self.api_key and self.app_key:
+            # API key authentication (preferred)
+            headers['DD-API-KEY'] = self.api_key
+            headers['DD-APPLICATION-KEY'] = self.app_key
+        elif self.cookies:
+            # Cookie-based authentication (cookies are already semicolon separated)
+            headers['Cookie'] = self.cookies
+        
+        return headers
     
     def query_service_consumers(self, env: str, service: str, limit: int = 100) -> List[Dict]:
         """
@@ -438,18 +468,28 @@ def main():
     parser.add_argument('environment', help='Environment to analyze (e.g., production, staging)')
     parser.add_argument('datadog_host', help='Datadog host URL (e.g., https://app.datadoghq.com)')
     
-    # Authentication
-    parser.add_argument('--api-key', required=True, help='Datadog API key')
-    parser.add_argument('--app-key', required=True, help='Datadog application key')
+    # Authentication options (mutually exclusive groups)
+    auth_group = parser.add_mutually_exclusive_group(required=True)
+    auth_group.add_argument('--api-key', help='Datadog API key (requires --app-key)')
+    auth_group.add_argument('--cookies', help='Cookie string (semicolon separated) for authentication')
+    
+    parser.add_argument('--app-key', help='Datadog application key (required with --api-key)')
     
     # Optional arguments
     parser.add_argument('-t', '--team', help='Optional: Process only this team (e.g., Oktagon)')
+    parser.add_argument('-a', '--application', help='Optional: Process only this application (e.g., iam-service)')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds (default: 30)')
     parser.add_argument('--rate-limit', type=float, default=1.0, help='Delay between API requests in seconds (default: 1.0)')
     parser.add_argument('--limit', type=int, default=100, help='Max consumers per service (default: 100)')
     parser.add_argument('--output-dir', default='.', help='Output directory for reports (default: current directory)')
     
     args = parser.parse_args()
+    
+    # Validate authentication combinations
+    if args.api_key and not args.app_key:
+        parser.error('--app-key is required when using --api-key')
+    if args.app_key and not args.api_key:
+        parser.error('--api-key is required when using --app-key')
     
     # Load input file
     print(f"{Fore.CYAN}Loading attribution data from: {args.input_file}{Style.RESET_ALL}")
@@ -491,13 +531,61 @@ def main():
         
         attribution_data = filtered_data
     
+    # Filter to single application if specified
+    if args.application:
+        app_found = False
+        filtered_data = {}
+        
+        for team_name, team_data in attribution_data.items():
+            # Check if this team has the specified application
+            filtered_applications = []
+            for application in team_data.get('applications', []):
+                # Case-insensitive application name matching
+                if (application.get('name', '').lower() == args.application.lower() or
+                    application.get('title', '').lower() == args.application.lower()):
+                    filtered_applications.append(application)
+                    app_found = True
+            
+            # Only include team if it has the application
+            if filtered_applications:
+                filtered_team_data = team_data.copy()
+                filtered_team_data['applications'] = filtered_applications
+                filtered_team_data['application_count'] = len(filtered_applications)
+                filtered_data[team_name] = filtered_team_data
+        
+        if not app_found:
+            print(f"{Fore.RED}Error: Application '{args.application}' not found in input file{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Available applications (first 20):{Style.RESET_ALL}")
+            all_apps = []
+            for team_data in attribution_data.values():
+                for application in team_data.get('applications', []):
+                    app_name = application.get('title') or application.get('name')
+                    if app_name:
+                        all_apps.append(app_name)
+            
+            for app_name in sorted(set(all_apps))[:20]:
+                print(f"  - {app_name}")
+            if len(set(all_apps)) > 20:
+                print(f"  ... and {len(set(all_apps)) - 20} more")
+            sys.exit(1)
+        
+        print(f"{Fore.GREEN}  Filtering to single application: {args.application}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}  Found in {len(filtered_data)} team(s){Style.RESET_ALL}")
+        attribution_data = filtered_data
+    
     # Initialize Datadog client
     print(f"{Fore.CYAN}Initializing Datadog client: {args.datadog_host}{Style.RESET_ALL}")
+    if args.api_key:
+        print(f"{Fore.CYAN}Authentication: API key + Application key{Style.RESET_ALL}")
+    elif args.cookies:
+        print(f"{Fore.CYAN}Authentication: Cookie{Style.RESET_ALL}")
     print(f"{Fore.CYAN}Rate limit delay: {args.rate_limit} seconds between requests{Style.RESET_ALL}")
+    
     datadog_client = DatadogClient(
         host=args.datadog_host,
         api_key=args.api_key,
         app_key=args.app_key,
+        cookies=args.cookies,
         timeout=args.timeout,
         rate_limit_delay=args.rate_limit
     )

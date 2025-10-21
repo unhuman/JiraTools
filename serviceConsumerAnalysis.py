@@ -45,7 +45,8 @@ class DatadogClient:
     """Client for interacting with Datadog API with flexible authentication."""
     
     def __init__(self, host: str, api_key: Optional[str] = None, app_key: Optional[str] = None, 
-                 cookies: Optional[str] = None, timeout: int = 30, rate_limit_delay: float = 1.0):
+                 cookies: Optional[str] = None, timeout: int = 30, rate_limit_delay: float = 1.0, 
+                 preserve_rate_limit: int = 1):
         """
         Initialize Datadog client with either API keys or cookie authentication.
         
@@ -56,6 +57,7 @@ class DatadogClient:
             cookies: Cookie string (semicolon separated) for authentication (optional if API keys provided)
             timeout: Request timeout in seconds
             rate_limit_delay: Delay between requests in seconds
+            preserve_rate_limit: Number of requests to preserve from rate limit (default: 1)
         """
         self.host = host.rstrip('/')
         self.api_key = api_key
@@ -63,7 +65,10 @@ class DatadogClient:
         self.cookies = cookies
         self.timeout = timeout
         self.rate_limit_delay = rate_limit_delay
+        self.preserve_rate_limit = preserve_rate_limit
         self.last_request_time = 0
+        self.rate_limit_total = None  # Will be set on first request
+        self.rate_limit_validated = False
         
         # Validate that we have some form of authentication
         if not ((api_key and app_key) or cookies):
@@ -96,16 +101,31 @@ class DatadogClient:
             remaining = int(rate_limit_remaining)
             limit = int(rate_limit_limit) if rate_limit_limit else 100
             
+            # On first request, validate preserve_rate_limit setting
+            if not self.rate_limit_validated:
+                self.rate_limit_total = limit
+                self.rate_limit_validated = True
+                
+                if self.preserve_rate_limit >= limit:
+                    print(f"{Fore.RED}[Rate Limit] ERROR: preserve-rate-limit ({self.preserve_rate_limit}) is >= total rate limit ({limit}){Style.RESET_ALL}")
+                    print(f"{Fore.RED}[Rate Limit] This would prevent any requests from being made.{Style.RESET_ALL}")
+                    raise ValueError(f"preserve-rate-limit ({self.preserve_rate_limit}) must be less than the rate limit total ({limit})")
+                
+                if self.preserve_rate_limit > 0:
+                    print(f"{Fore.CYAN}[Rate Limit] Preserving {self.preserve_rate_limit} request(s) from rate limit of {limit}{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.CYAN}[Rate Limit] No rate limit preservation - will consume full limit of {limit}{Style.RESET_ALL}")
+            
             print(f"{Fore.CYAN}[Rate Limit] {rate_limit_name}: {remaining}/{limit} remaining{Style.RESET_ALL}")
             
             # If we hit the rate limit (0 remaining), sleep for the reset period
             if remaining == 0 and rate_limit_reset:
                 reset_seconds = int(rate_limit_reset)
                 self._countdown_sleep(reset_seconds, "LIMIT HIT! Sleeping")
-            # If we're running low on requests (less than 2), add a delay
-            elif remaining < 2 and rate_limit_reset:
+            # If we're at or below the preserve threshold, add a delay
+            elif remaining <= self.preserve_rate_limit and rate_limit_reset:
                 reset_seconds = int(rate_limit_reset)
-                self._countdown_sleep(reset_seconds, f"Only {remaining} requests remaining. Sleeping")
+                self._countdown_sleep(reset_seconds, f"Only {remaining} requests remaining (preserving {self.preserve_rate_limit}). Sleeping")
     
     def _countdown_sleep(self, seconds: int, prefix: str = "Sleeping"):
         """Sleep for the specified seconds with a countdown display."""
@@ -850,6 +870,7 @@ def main():
     parser.add_argument('-a', '--application', help='Optional: Process only this application (e.g., iam-service)')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds (default: 30)')
     parser.add_argument('--rate-limit', type=float, default=1.0, help='Delay between API requests in seconds (default: 1.0)')
+    parser.add_argument('--preserve-rate-limit', type=int, default=1, help='Number of requests to preserve from rate limit (default: 1, use 0 to consume full limit)')
     parser.add_argument('--limit', type=int, default=100, help='Max consumers per service (default: 100)')
     parser.add_argument('--time-period', default='1h', help='Time period to query (e.g., 1h, 4h, 1d, 1w) (default: 1h)')
     parser.add_argument('--output-dir', default='.', help='Output directory for reports (default: current directory)')
@@ -861,6 +882,10 @@ def main():
         parser.error('--app-key is required when using --api-key')
     if args.app_key and not args.api_key:
         parser.error('--api-key is required when using --app-key')
+    
+    # Validate preserve-rate-limit
+    if args.preserve_rate_limit < 0:
+        parser.error('--preserve-rate-limit must be >= 0')
     
     # Load input file
     print(f"{Fore.CYAN}Loading attribution data from: {args.input_file}{Style.RESET_ALL}")
@@ -954,6 +979,7 @@ def main():
     elif args.cookies:
         print(f"{Fore.CYAN}Authentication: Cookie{Style.RESET_ALL}")
     print(f"{Fore.CYAN}Rate limit delay: {args.rate_limit} seconds between requests{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Preserve rate limit: {args.preserve_rate_limit} request(s){Style.RESET_ALL}")
     
     datadog_client = DatadogClient(
         host=args.datadog_host,
@@ -961,7 +987,8 @@ def main():
         app_key=args.app_key,
         cookies=args.cookies,
         timeout=args.timeout,
-        rate_limit_delay=args.rate_limit
+        rate_limit_delay=args.rate_limit,
+        preserve_rate_limit=args.preserve_rate_limit
     )
     
     # Initialize analyzer

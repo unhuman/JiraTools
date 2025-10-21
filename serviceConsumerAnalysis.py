@@ -26,6 +26,63 @@ Examples:
     
     # Filter to both team and application
     python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --cookies "..." -t Oktagon -a iam-service
+
+Output Reports:
+    The script generates two types of reports in JSON format:
+    
+    1. Domain Reports (domain_reports):
+       Shows WHICH DOMAINS are calling your services, aggregated by the caller's domain.
+       
+       Structure:
+       {
+         "Target Domain": {
+           "Calling Domain": {
+             "count": <number of requests>,
+             "percentage": <percentage of total requests>,
+             "details": [
+               {
+                 "target_service": "<service being called>",
+                 "calling_service": "<service making the call>",
+                 "count": <number of requests>
+               }
+             ]
+           }
+         }
+       }
+       
+       Example: If the IAM domain receives 1000 total requests, and 300 come from the 
+       "Event Platform" domain, the report shows:
+       - Event Platform: count=300, percentage=30.0%
+       - Details list shows which specific Event Platform services called which IAM services
+       
+       Use this to answer: "Which business domains/teams are consuming our services?"
+    
+    2. System Reports (system_reports):
+       Shows WHICH OF YOUR SYSTEMS are receiving calls, aggregated by system within your domain.
+       
+       Structure:
+       {
+         "Target Domain": {
+           "System Name": {
+             "count": <number of requests>,
+             "percentage": <percentage of total requests>
+           }
+         }
+       }
+       
+       Example: If the IAM domain has systems "iam", "universal-login", and "classic-event",
+       the report shows how many requests each system received:
+       - iam: count=620170, percentage=88.41%
+       - universal-login: count=5693, percentage=0.81%
+       - classic-event: count=75134, percentage=10.71%
+       
+       Use this to answer: "Which of our internal systems are being called most frequently?"
+    
+    Key Differences:
+    - domain_reports: External view - shows WHO is calling you (by their domain)
+    - system_reports: Internal view - shows WHICH of your systems are being called
+    
+    Both reports are sorted by count (descending) for easy consumption.
 """
 
 import argparse

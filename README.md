@@ -11,6 +11,7 @@ Useful Stuff for working with Jira
 1. `subtasksUserDifferentParentOwner.py`: Finds user contributions on subtasks when parent tickets owned by someone else
 1. `standardTicketCreator.py`: Creates standard Jira tickets from an Excel file with team and category data
 1. `teamApplicationAttribution.py`: Queries Backstage for all teams and their owned applications (type=application only), outputs a JSON mapping
+1. `serviceConsumerAnalysis.py`: Analyzes service consumers using Datadog trace data - finds which services call your team's applications and generates reports aggregated by domain and system
 
 ## Documentation:
 - [Standard Ticket Creator Documentation](standardTicketCreator_documentation.md)

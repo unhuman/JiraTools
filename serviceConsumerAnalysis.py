@@ -815,6 +815,36 @@ class ServiceConsumerAnalyzer:
             print(f"  Consuming domains: {report['unique_consuming_domains']}")
             print(f"  Systems involved: {report['unique_systems']}")
         
+        # Sort details inside each domain_reports entry by count descending
+        for target_domain, consumers in formatted_domain_reports.items():
+            for consumer_domain, info in consumers.items():
+                if 'details' in info and isinstance(info['details'], list):
+                    info['details'] = sorted(
+                        info['details'],
+                        key=lambda entry: entry.get('count', 0),
+                        reverse=True
+                    )
+
+        # Before generating summary, sort reports by count descending
+        sorted_domain_reports = {}
+        for domain_key, consumers in formatted_domain_reports.items():
+            # Sort consumer domains by count
+            sorted_consumers = dict(sorted(
+                consumers.items(),
+                key=lambda kv: kv[1]['count'],
+                reverse=True
+            ))
+            sorted_domain_reports[domain_key] = sorted_consumers
+        sorted_system_reports = {}
+        for domain_key, systems in formatted_system_reports.items():
+            # Sort systems by count
+            sorted_syss = dict(sorted(
+                systems.items(),
+                key=lambda kv: kv[1]['count'],
+                reverse=True
+            ))
+            sorted_system_reports[domain_key] = sorted_syss
+
         # Generate summary report with custom filename
         if application_name:
             # Use application name if provided
@@ -829,8 +859,8 @@ class ServiceConsumerAnalyzer:
         summary = {
             'environment': self.environment,
             'domains_analyzed': list(domain_consumers.keys()),
-            'domain_reports': formatted_domain_reports,
-            'system_reports': formatted_system_reports
+            'domain_reports': sorted_domain_reports,
+            'system_reports': sorted_system_reports
         }
         
         # Add filter info if present

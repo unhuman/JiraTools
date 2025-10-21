@@ -59,24 +59,34 @@ Output Reports:
     
     2. System Reports (system_reports):
        Shows WHICH OF YOUR SYSTEMS are receiving calls, aggregated by system within your domain.
+       Includes a breakdown of which specific services within each system are receiving calls.
        
        Structure:
        {
          "Target Domain": {
            "System Name": {
              "count": <number of requests>,
-             "percentage": <percentage of total requests>
+             "percentage": <percentage of total requests>,
+             "services": [
+               {
+                 "service": "<service name>",
+                 "count": <number of requests to this service>
+               }
+             ]
            }
          }
        }
        
        Example: If the IAM domain has systems "iam", "universal-login", and "classic-event",
        the report shows how many requests each system received:
-       - iam: count=620170, percentage=88.41%
-       - universal-login: count=5693, percentage=0.81%
-       - classic-event: count=75134, percentage=10.71%
+       - iam: count=620170, percentage=88.41%, services=[{service: "iam-service", count: 500000}, ...]
+       - universal-login: count=5693, percentage=0.81%, services=[{service: "login-api", count: 5693}]
+       - classic-event: count=75134, percentage=10.71%, services=[{service: "event-service", count: 75134}]
        
-       Use this to answer: "Which of our internal systems are being called most frequently?"
+       The services list within each system is sorted by count (descending).
+       
+       Use this to answer: "Which of our internal systems are being called most frequently?" 
+       and "Which specific services within each system are receiving the most traffic?"
     
     Key Differences:
     - domain_reports: External view - shows WHO is calling you (by their domain)
@@ -722,6 +732,7 @@ class ServiceConsumerAnalyzer:
         domain_consumers = defaultdict(lambda: defaultdict(int))  # domain -> {consuming_domain -> count}
         system_consumers = defaultdict(lambda: defaultdict(int))  # domain -> {system -> count}
         domain_details = defaultdict(lambda: defaultdict(list))  # domain -> {consuming_domain -> [details]}
+        system_details = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # domain -> {system -> {service -> count}}
         
         total_services = sum(len(team_data.get('applications', [])) 
                            for team_data in self.attribution_data.values())
@@ -776,6 +787,9 @@ class ServiceConsumerAnalyzer:
                         # Aggregate by system
                         system_consumers[team_domain][system] += call_count
                         
+                        # Track system details (services within each system)
+                        system_details[team_domain][system][service_name] += call_count
+                        
                         # Track details
                         domain_details[team_domain][consumer_domain].append({
                             'target_service': service_name,
@@ -786,6 +800,9 @@ class ServiceConsumerAnalyzer:
                         # Consumer not in our attribution map
                         domain_consumers[team_domain]['External/Unknown'] += call_count
                         system_consumers[team_domain][system] += call_count
+                        
+                        # Track system details (services within each system)
+                        system_details[team_domain][system][service_name] += call_count
                         
                         # Track details for external/unknown
                         domain_details[team_domain]['External/Unknown'].append({
@@ -799,7 +816,8 @@ class ServiceConsumerAnalyzer:
         return {
             'domain_consumers': dict(domain_consumers),
             'system_consumers': dict(system_consumers),
-            'domain_details': dict(domain_details)
+            'domain_details': dict(domain_details),
+            'system_details': dict(system_details)
         }
     
     def generate_reports(self, analysis_results: Dict, output_dir: str = '.', team_name: str = None, application_name: str = None):
@@ -815,6 +833,7 @@ class ServiceConsumerAnalyzer:
         domain_consumers = analysis_results['domain_consumers']
         system_consumers = analysis_results['system_consumers']
         domain_details = analysis_results.get('domain_details', {})
+        system_details = analysis_results.get('system_details', {})
         
         print(f"\n{Fore.CYAN}Generating domain reports...{Style.RESET_ALL}\n")
         
@@ -834,7 +853,7 @@ class ServiceConsumerAnalyzer:
             
             formatted_domain_reports[target_domain] = formatted_consumers
         
-        # Format system reports with count and percentage
+        # Format system reports with count, percentage, and services list
         formatted_system_reports = {}
         for target_domain, systems in system_consumers.items():
             total_calls = sum(systems.values())
@@ -842,9 +861,20 @@ class ServiceConsumerAnalyzer:
             
             for system, count in systems.items():
                 percentage = (count / total_calls * 100) if total_calls > 0 else 0
+                
+                # Get services list for this system
+                services_in_system = system_details.get(target_domain, {}).get(system, {})
+                services_list = [
+                    {'service': service, 'count': svc_count}
+                    for service, svc_count in services_in_system.items()
+                ]
+                # Sort services by count descending
+                services_list = sorted(services_list, key=lambda x: x['count'], reverse=True)
+                
                 formatted_systems[system] = {
                     'count': count,
-                    'percentage': round(percentage, 2)
+                    'percentage': round(percentage, 2),
+                    'services': services_list
                 }
             
             formatted_system_reports[target_domain] = formatted_systems

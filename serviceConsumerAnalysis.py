@@ -593,16 +593,17 @@ class DatadogClient:
 class ServiceConsumerAnalyzer:
     """Analyzes service consumers and generates reports."""
     
-    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filter: str = None):
+    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filter: str = None, full_attribution_data: Dict = None):
         """
         Initialize analyzer.
         
         Args:
-            attribution_data: Data from teamApplicationAttribution.py
+            attribution_data: Data from teamApplicationAttribution.py (filtered for analysis)
             datadog_client: Configured Datadog client
             environment: Environment to analyze
             time_period: Time period to query (e.g., 1h, 4h, 1d, 1w)
             application_filter: If specified, the exact application name provided by user to use in queries
+            full_attribution_data: Complete unfiltered attribution data for domain lookups
         """
         self.attribution_data = attribution_data
         self.datadog_client = datadog_client
@@ -610,14 +611,14 @@ class ServiceConsumerAnalyzer:
         self.time_period = time_period
         self.application_filter = application_filter  # Store the user-provided application name
         
-        # Build reverse lookup maps
+        # Build reverse lookup maps from full data (or filtered if full not provided)
         self.service_to_team = {}  # service_name -> team_info
         self.service_to_system = {}  # service_name -> system
-        self._build_lookup_maps()
+        self._build_lookup_maps(full_attribution_data or attribution_data)
     
-    def _build_lookup_maps(self):
+    def _build_lookup_maps(self, data_source: Dict):
         """Build reverse lookup maps from service name to team and system."""
-        for team_name, team_data in self.attribution_data.items():
+        for team_name, team_data in data_source.items():
             team_info = {
                 'team_name': team_data.get('team_name'),
                 'team_title': team_data.get('team_title'),
@@ -643,6 +644,7 @@ class ServiceConsumerAnalyzer:
         # Aggregation structures
         domain_consumers = defaultdict(lambda: defaultdict(int))  # domain -> {consuming_domain -> count}
         system_consumers = defaultdict(lambda: defaultdict(int))  # domain -> {system -> count}
+        domain_details = defaultdict(lambda: defaultdict(list))  # domain -> {consuming_domain -> [details]}
         
         total_services = sum(len(team_data.get('applications', [])) 
                            for team_data in self.attribution_data.values())
@@ -696,42 +698,93 @@ class ServiceConsumerAnalyzer:
                         
                         # Aggregate by system
                         system_consumers[team_domain][system] += call_count
+                        
+                        # Track details
+                        domain_details[team_domain][consumer_domain].append({
+                            'target_service': service_name,
+                            'calling_service': consumer_service,
+                            'count': call_count
+                        })
                     else:
                         # Consumer not in our attribution map
                         domain_consumers[team_domain]['External/Unknown'] += call_count
                         system_consumers[team_domain][system] += call_count
+                        
+                        # Track details for external/unknown
+                        domain_details[team_domain]['External/Unknown'].append({
+                            'target_service': service_name,
+                            'calling_service': consumer_service,
+                            'count': call_count
+                        })
                 
                 print(f"    Found {len(consumers)} consumers")
         
         return {
             'domain_consumers': dict(domain_consumers),
-            'system_consumers': dict(system_consumers)
+            'system_consumers': dict(system_consumers),
+            'domain_details': dict(domain_details)
         }
     
-    def generate_reports(self, analysis_results: Dict, output_dir: str = '.'):
+    def generate_reports(self, analysis_results: Dict, output_dir: str = '.', team_name: str = None, application_name: str = None):
         """
         Generate domain reports from analysis results.
         
         Args:
             analysis_results: Results from analyze_all_teams()
             output_dir: Directory to save reports
+            team_name: Optional team name for custom filename
+            application_name: Optional application name for custom filename
         """
         domain_consumers = analysis_results['domain_consumers']
         system_consumers = analysis_results['system_consumers']
+        domain_details = analysis_results.get('domain_details', {})
         
         print(f"\n{Fore.CYAN}Generating domain reports...{Style.RESET_ALL}\n")
+        
+        # Format domain reports with count, percentage, and details
+        formatted_domain_reports = {}
+        for target_domain, consumer_domains in domain_consumers.items():
+            total_calls = sum(consumer_domains.values())
+            formatted_consumers = {}
+            
+            for consumer_domain, count in consumer_domains.items():
+                percentage = (count / total_calls * 100) if total_calls > 0 else 0
+                formatted_consumers[consumer_domain] = {
+                    'count': count,
+                    'percentage': round(percentage, 2),
+                    'details': domain_details.get(target_domain, {}).get(consumer_domain, [])
+                }
+            
+            formatted_domain_reports[target_domain] = formatted_consumers
+        
+        # Format system reports with count and percentage
+        formatted_system_reports = {}
+        for target_domain, systems in system_consumers.items():
+            total_calls = sum(systems.values())
+            formatted_systems = {}
+            
+            for system, count in systems.items():
+                percentage = (count / total_calls * 100) if total_calls > 0 else 0
+                formatted_systems[system] = {
+                    'count': count,
+                    'percentage': round(percentage, 2)
+                }
+            
+            formatted_system_reports[target_domain] = formatted_systems
         
         for domain in domain_consumers.keys():
             report_filename = f"{output_dir}/{domain.replace(' ', '_')}_consumer_report.json"
             
+            total_calls = sum(domain_consumers.get(domain, {}).values())
+            
             report = {
                 'domain': domain,
                 'environment': self.environment,
-                'consumer_domains': domain_consumers.get(domain, {}),
-                'consumer_by_system': system_consumers.get(domain, {}),
-                'total_calls_received': sum(domain_consumers.get(domain, {}).values()),
+                'total_calls_received': total_calls,
                 'unique_consuming_domains': len(domain_consumers.get(domain, {})),
-                'unique_systems': len(system_consumers.get(domain, {}))
+                'unique_systems': len(system_consumers.get(domain, {})),
+                'consumer_domains': formatted_domain_reports.get(domain, {}),
+                'consumer_by_system': formatted_system_reports.get(domain, {})
             }
             
             with open(report_filename, 'w') as f:
@@ -742,14 +795,29 @@ class ServiceConsumerAnalyzer:
             print(f"  Consuming domains: {report['unique_consuming_domains']}")
             print(f"  Systems involved: {report['unique_systems']}")
         
-        # Generate summary report
-        summary_filename = f"{output_dir}/consumer_analysis_summary.json"
+        # Generate summary report with custom filename
+        if application_name:
+            # Use application name if provided
+            summary_filename = f"{output_dir}/{application_name.replace(' ', '_')}_analysis_summary.json"
+        elif team_name:
+            # Use team name if provided
+            summary_filename = f"{output_dir}/{team_name.replace(' ', '_')}_analysis_summary.json"
+        else:
+            # Default filename
+            summary_filename = f"{output_dir}/consumer_analysis_summary.json"
+        
         summary = {
             'environment': self.environment,
             'domains_analyzed': list(domain_consumers.keys()),
-            'domain_reports': domain_consumers,
-            'system_reports': system_consumers
+            'domain_reports': formatted_domain_reports,
+            'system_reports': formatted_system_reports
         }
+        
+        # Add filter info if present
+        if application_name:
+            summary['filtered_by'] = {'application': application_name}
+        elif team_name:
+            summary['filtered_by'] = {'team': team_name}
         
         with open(summary_filename, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -807,6 +875,9 @@ def main():
         sys.exit(1)
     
     print(f"  Loaded {len(attribution_data)} teams")
+    
+    # Keep a copy of full data for domain lookups
+    full_attribution_data = attribution_data.copy()
     
     # Filter to single team if specified
     if args.team:
@@ -899,14 +970,20 @@ def main():
         datadog_client=datadog_client,
         environment=args.environment,
         time_period=args.time_period,
-        application_filter=args.application  # Pass the user-provided application name
+        application_filter=args.application,  # Pass the user-provided application name
+        full_attribution_data=full_attribution_data  # Pass full data for domain lookups
     )
     
     # Run analysis
     results = analyzer.analyze_all_teams()
     
-    # Generate reports
-    analyzer.generate_reports(results, output_dir=args.output_dir)
+    # Generate reports with custom filenames based on filters
+    analyzer.generate_reports(
+        results, 
+        output_dir=args.output_dir,
+        team_name=args.team,
+        application_name=args.application
+    )
     
     print(f"\n{Fore.GREEN}Consumer analysis complete!{Style.RESET_ALL}")
 

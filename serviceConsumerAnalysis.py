@@ -14,8 +14,8 @@ Authentication (choose one):
     --cookies COOKIES              Use cookie-based authentication (semicolon separated)
 
 Optional Filters:
-    -t, --team TEAM                Process only this team
-    -a, --application APP          Process only this application
+    -t, --teams TEAMS              Process only these teams (comma-separated list)
+    -a, --applications APPS        Process only these applications (comma-separated list)
 
 Examples:
     # Using API keys, filter to one team
@@ -24,8 +24,8 @@ Examples:
     # Using cookie authentication, filter to one application
     python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --cookies "_dd_did=...; datadog-theme=light; dogweb=..." -a iam-service
     
-    # Filter to both team and application
-    python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --cookies "..." -t Oktagon -a iam-service
+    # Filter to multiple teams and applications
+    python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --cookies "..." -t "Oktagon,Identity" -a "iam-service,auth-service"
 
 Output Reports:
     The script generates two types of reports in JSON format:
@@ -681,7 +681,7 @@ class DatadogClient:
 class ServiceConsumerAnalyzer:
     """Analyzes service consumers and generates reports."""
     
-    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filter: str = None, full_attribution_data: Dict = None):
+    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None):
         """
         Initialize analyzer.
         
@@ -690,14 +690,14 @@ class ServiceConsumerAnalyzer:
             datadog_client: Configured Datadog client
             environment: Environment to analyze
             time_period: Time period to query (e.g., 1h, 4h, 1d, 1w)
-            application_filter: If specified, the exact application name provided by user to use in queries
+            application_filters: List of application name filters (normalized, lowercase) - no longer used for queries
             full_attribution_data: Complete unfiltered attribution data for domain lookups
         """
         self.attribution_data = attribution_data
         self.datadog_client = datadog_client
         self.environment = environment
         self.time_period = time_period
-        self.application_filter = application_filter  # Store the user-provided application name
+        self.application_filters = application_filters or []  # Store the list of application filters
         
         # Build reverse lookup maps from full data (or filtered if full not provided)
         self.service_to_team = {}  # service_name -> team_info
@@ -749,12 +749,8 @@ class ServiceConsumerAnalyzer:
             print(f"  Applications: {len(applications)}")
             
             for app in applications:
-                # Use the user-provided application filter if available, otherwise use JSON name
-                if self.application_filter:
-                    service_name = self.application_filter
-                else:
-                    service_name = app.get('name')
-                
+                # Use the service name from the application data
+                service_name = app.get('name')
                 system = app.get('system', 'Unknown')
                 processed += 1
                 
@@ -821,15 +817,15 @@ class ServiceConsumerAnalyzer:
             'system_details': dict(system_details)
         }
     
-    def generate_reports(self, analysis_results: Dict, output_dir: str = '.', team_name: str = None, application_name: str = None):
+    def generate_reports(self, analysis_results: Dict, output_dir: str = '.', team_names: str = None, application_names: str = None):
         """
         Generate domain reports from analysis results.
         
         Args:
             analysis_results: Results from analyze_all_teams()
             output_dir: Directory to save reports
-            team_name: Optional team name for custom filename
-            application_name: Optional application name for custom filename
+            team_names: Optional comma-separated team names for custom filename
+            application_names: Optional comma-separated application names for custom filename
         """
         domain_consumers = analysis_results['domain_consumers']
         system_consumers = analysis_results['system_consumers']
@@ -880,6 +876,38 @@ class ServiceConsumerAnalyzer:
             
             formatted_system_reports[target_domain] = formatted_systems
         
+        # Sort all data by count descending before generating any reports
+        # 1. Sort details inside each consumer_domains entry by count descending
+        for target_domain, consumers in formatted_domain_reports.items():
+            for consumer_domain, info in consumers.items():
+                if 'details' in info and isinstance(info['details'], list):
+                    info['details'] = sorted(
+                        info['details'],
+                        key=lambda entry: entry.get('count', 0),
+                        reverse=True
+                    )
+        
+        # 2. Sort consumer_domains by count descending
+        sorted_domain_reports = {}
+        for domain_key, consumers in formatted_domain_reports.items():
+            sorted_consumers = dict(sorted(
+                consumers.items(),
+                key=lambda kv: kv[1]['count'],
+                reverse=True
+            ))
+            sorted_domain_reports[domain_key] = sorted_consumers
+        
+        # 3. Sort consumer_by_system by count descending
+        sorted_system_reports = {}
+        for domain_key, systems in formatted_system_reports.items():
+            sorted_systems = dict(sorted(
+                systems.items(),
+                key=lambda kv: kv[1]['count'],
+                reverse=True
+            ))
+            sorted_system_reports[domain_key] = sorted_systems
+        
+        # Now generate individual domain reports with sorted data
         for domain in domain_consumers.keys():
             report_filename = f"{output_dir}/{domain.replace(' ', '_')}_consumer_report.json"
             
@@ -891,8 +919,8 @@ class ServiceConsumerAnalyzer:
                 'total_calls_received': total_calls,
                 'unique_consuming_domains': len(domain_consumers.get(domain, {})),
                 'unique_systems': len(system_consumers.get(domain, {})),
-                'consumer_domains': formatted_domain_reports.get(domain, {}),
-                'consumer_by_system': formatted_system_reports.get(domain, {})
+                'consumer_domains': sorted_domain_reports.get(domain, {}),
+                'consumer_by_system': sorted_system_reports.get(domain, {})
             }
             
             with open(report_filename, 'w') as f:
@@ -903,43 +931,24 @@ class ServiceConsumerAnalyzer:
             print(f"  Consuming domains: {report['unique_consuming_domains']}")
             print(f"  Systems involved: {report['unique_systems']}")
         
-        # Sort details inside each domain_reports entry by count descending
-        for target_domain, consumers in formatted_domain_reports.items():
-            for consumer_domain, info in consumers.items():
-                if 'details' in info and isinstance(info['details'], list):
-                    info['details'] = sorted(
-                        info['details'],
-                        key=lambda entry: entry.get('count', 0),
-                        reverse=True
-                    )
-
-        # Before generating summary, sort reports by count descending
-        sorted_domain_reports = {}
-        for domain_key, consumers in formatted_domain_reports.items():
-            # Sort consumer domains by count
-            sorted_consumers = dict(sorted(
-                consumers.items(),
-                key=lambda kv: kv[1]['count'],
-                reverse=True
-            ))
-            sorted_domain_reports[domain_key] = sorted_consumers
-        sorted_system_reports = {}
-        for domain_key, systems in formatted_system_reports.items():
-            # Sort systems by count
-            sorted_syss = dict(sorted(
-                systems.items(),
-                key=lambda kv: kv[1]['count'],
-                reverse=True
-            ))
-            sorted_system_reports[domain_key] = sorted_syss
-
         # Generate summary report with custom filename
-        if application_name:
-            # Use application name if provided
-            summary_filename = f"{output_dir}/{application_name.replace(' ', '_')}_analysis_summary.json"
-        elif team_name:
-            # Use team name if provided
-            summary_filename = f"{output_dir}/{team_name.replace(' ', '_')}_analysis_summary.json"
+        # Team filter takes precedence over application filter
+        if team_names:
+            # Check if multiple teams
+            if ',' in team_names:
+                summary_filename = f"{output_dir}/multiple_teams_report.json"
+            else:
+                # Single team - use team name (sanitize for filename)
+                team_label = team_names.replace(' ', '_')
+                summary_filename = f"{output_dir}/{team_label}_analysis_summary.json"
+        elif application_names:
+            # Check if multiple applications
+            if ',' in application_names:
+                summary_filename = f"{output_dir}/multiple_applications_analysis_summary.json"
+            else:
+                # Single application - use app name (sanitize for filename)
+                app_label = application_names.replace(' ', '_')
+                summary_filename = f"{output_dir}/{app_label}_analysis_summary.json"
         else:
             # Default filename
             summary_filename = f"{output_dir}/consumer_analysis_summary.json"
@@ -952,10 +961,10 @@ class ServiceConsumerAnalyzer:
         }
         
         # Add filter info if present
-        if application_name:
-            summary['filtered_by'] = {'application': application_name}
-        elif team_name:
-            summary['filtered_by'] = {'team': team_name}
+        if application_names:
+            summary['filtered_by'] = {'applications': application_names}
+        elif team_names:
+            summary['filtered_by'] = {'teams': team_names}
         
         with open(summary_filename, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -984,8 +993,8 @@ def main():
     parser.add_argument('--app-key', help='Datadog application key (required with --api-key)')
     
     # Optional arguments
-    parser.add_argument('-t', '--team', help='Optional: Process only this team (e.g., Oktagon)')
-    parser.add_argument('-a', '--application', help='Optional: Process only this application (e.g., iam-service)')
+    parser.add_argument('-t', '--teams', help='Optional: Process only these teams, comma-separated (e.g., "Oktagon,Identity")')
+    parser.add_argument('-a', '--applications', help='Optional: Process only these applications, comma-separated (e.g., "iam-service,auth-service")')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds (default: 30)')
     parser.add_argument('--rate-limit', type=float, default=1.0, help='Delay between API requests in seconds (default: 1.0)')
     parser.add_argument('--preserve-rate-limit', type=int, default=1, help='Number of requests to preserve from rate limit (default: 1, use 0 to consume full limit)')
@@ -1022,73 +1031,93 @@ def main():
     # Keep a copy of full data for domain lookups
     full_attribution_data = attribution_data.copy()
     
-    # Filter to single team if specified
-    if args.team:
-        team_found = False
-        filtered_data = {}
+    # Filter to specified teams if provided
+    team_filters = []
+    if args.teams:
+        # Parse comma-separated list and normalize (strip whitespace, lowercase)
+        team_filters = [t.strip().lower() for t in args.teams.split(',') if t.strip()]
         
-        for team_name, team_data in attribution_data.items():
-            # Case-insensitive team matching
-            if (team_name.lower() == args.team.lower() or 
-                team_data.get('team_name', '').lower() == args.team.lower() or
-                team_data.get('team_title', '').lower() == args.team.lower()):
-                filtered_data[team_name] = team_data
-                team_found = True
-                print(f"{Fore.GREEN}  Filtering to single team: {team_data.get('team_title', team_name)}{Style.RESET_ALL}")
-                break
-        
-        if not team_found:
-            print(f"{Fore.RED}Error: Team '{args.team}' not found in input file{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Available teams:{Style.RESET_ALL}")
-            for team_name, team_data in list(attribution_data.items())[:10]:
-                print(f"  - {team_data.get('team_title', team_name)}")
-            if len(attribution_data) > 10:
-                print(f"  ... and {len(attribution_data) - 10} more")
-            sys.exit(1)
-        
-        attribution_data = filtered_data
+        if team_filters:
+            teams_found = []
+            filtered_data = {}
+            
+            for team_name, team_data in attribution_data.items():
+                # Case-insensitive team matching against all filters
+                team_matches = any(
+                    team_name.lower() == filter_team or 
+                    team_data.get('team_name', '').lower() == filter_team or
+                    team_data.get('team_title', '').lower() == filter_team
+                    for filter_team in team_filters
+                )
+                
+                if team_matches:
+                    filtered_data[team_name] = team_data
+                    teams_found.append(team_data.get('team_title', team_name))
+            
+            if not teams_found:
+                print(f"{Fore.RED}Error: None of the specified teams found in input file: {args.teams}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}Available teams:{Style.RESET_ALL}")
+                for team_name, team_data in list(attribution_data.items())[:10]:
+                    print(f"  - {team_data.get('team_title', team_name)}")
+                if len(attribution_data) > 10:
+                    print(f"  ... and {len(attribution_data) - 10} more")
+                sys.exit(1)
+            
+            print(f"{Fore.GREEN}  Filtering to {len(teams_found)} team(s): {', '.join(teams_found)}{Style.RESET_ALL}")
+            attribution_data = filtered_data
     
-    # Filter to single application if specified
-    if args.application:
-        app_found = False
-        filtered_data = {}
+    # Filter to specified applications if provided
+    app_filters = []
+    if args.applications:
+        # Parse comma-separated list and normalize (strip whitespace, lowercase)
+        app_filters = [a.strip().lower() for a in args.applications.split(',') if a.strip()]
         
-        for team_name, team_data in attribution_data.items():
-            # Check if this team has the specified application
-            filtered_applications = []
-            for application in team_data.get('applications', []):
-                # Case-insensitive application name matching
-                if (application.get('name', '').lower() == args.application.lower() or
-                    application.get('title', '').lower() == args.application.lower()):
-                    filtered_applications.append(application)
-                    app_found = True
+        if app_filters:
+            apps_found = set()
+            filtered_data = {}
             
-            # Only include team if it has the application
-            if filtered_applications:
-                filtered_team_data = team_data.copy()
-                filtered_team_data['applications'] = filtered_applications
-                filtered_team_data['application_count'] = len(filtered_applications)
-                filtered_data[team_name] = filtered_team_data
-        
-        if not app_found:
-            print(f"{Fore.RED}Error: Application '{args.application}' not found in input file{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Available applications (first 20):{Style.RESET_ALL}")
-            all_apps = []
-            for team_data in attribution_data.values():
+            for team_name, team_data in attribution_data.items():
+                # Check if this team has any of the specified applications
+                filtered_applications = []
                 for application in team_data.get('applications', []):
-                    app_name = application.get('title') or application.get('name')
-                    if app_name:
-                        all_apps.append(app_name)
+                    # Case-insensitive application name matching against all filters
+                    app_matches = any(
+                        application.get('name', '').lower() == filter_app or
+                        application.get('title', '').lower() == filter_app
+                        for filter_app in app_filters
+                    )
+                    
+                    if app_matches:
+                        filtered_applications.append(application)
+                        app_name = application.get('title') or application.get('name')
+                        apps_found.add(app_name)
+                
+                # Only include team if it has at least one matching application
+                if filtered_applications:
+                    filtered_team_data = team_data.copy()
+                    filtered_team_data['applications'] = filtered_applications
+                    filtered_team_data['application_count'] = len(filtered_applications)
+                    filtered_data[team_name] = filtered_team_data
             
-            for app_name in sorted(set(all_apps))[:20]:
-                print(f"  - {app_name}")
-            if len(set(all_apps)) > 20:
-                print(f"  ... and {len(set(all_apps)) - 20} more")
-            sys.exit(1)
-        
-        print(f"{Fore.GREEN}  Filtering to single application: {args.application}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}  Found in {len(filtered_data)} team(s){Style.RESET_ALL}")
-        attribution_data = filtered_data
+            if not apps_found:
+                print(f"{Fore.RED}Error: None of the specified applications found in input file: {args.applications}{Style.RESET_ALL}")
+                print(f"{Fore.YELLOW}Available applications (first 20):{Style.RESET_ALL}")
+                all_apps = []
+                for team_data in attribution_data.values():
+                    for application in team_data.get('applications', []):
+                        app_name = application.get('title') or application.get('name')
+                        if app_name:
+                            all_apps.append(app_name)
+                
+                for app_name in sorted(set(all_apps))[:20]:
+                    print(f"  - {app_name}")
+                if len(set(all_apps)) > 20:
+                    print(f"  ... and {len(set(all_apps)) - 20} more")
+                sys.exit(1)
+            
+            print(f"{Fore.GREEN}  Filtering to {len(apps_found)} application(s): {', '.join(sorted(apps_found))}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}  Found in {len(filtered_data)} team(s){Style.RESET_ALL}")
+            attribution_data = filtered_data
     
     # Initialize Datadog client
     print(f"{Fore.CYAN}Initializing Datadog client: {args.datadog_host}{Style.RESET_ALL}")
@@ -1115,7 +1144,7 @@ def main():
         datadog_client=datadog_client,
         environment=args.environment,
         time_period=args.time_period,
-        application_filter=args.application,  # Pass the user-provided application name
+        application_filters=app_filters,  # Pass the list of application filters
         full_attribution_data=full_attribution_data  # Pass full data for domain lookups
     )
     
@@ -1126,8 +1155,8 @@ def main():
     analyzer.generate_reports(
         results, 
         output_dir=args.output_dir,
-        team_name=args.team,
-        application_name=args.application
+        team_names=args.teams,
+        application_names=args.applications
     )
     
     print(f"\n{Fore.GREEN}Consumer analysis complete!{Style.RESET_ALL}")

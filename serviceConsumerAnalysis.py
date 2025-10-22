@@ -243,9 +243,10 @@ class DatadogClient:
         # Parse time period format (e.g., "1h", "4h", "1d", "1w")
         print(f"{Fore.CYAN}[Request] Time period: {time_period}{Style.RESET_ALL}")
         
-        # Query: Find all spans where this service is the target, group by parent service
-        # This gives us which services are calling our target service
-        # Based on Datadog API documentation for aggregate spans
+        # Query: Find client spans calling the service
+        query_string = f'@span.kind:client @peer.service:"{service}" env:{env}'
+        group_by_facet = 'service'
+        
         # Using cardinality on trace_id to count unique requests (traces) instead of all spans
         payload = {
             "data": {
@@ -260,11 +261,11 @@ class DatadogClient:
                     "filter": {
                         "from": f"now-{time_period}",
                         "to": "now",
-                        "query": f'@span.kind:client @peer.service:"{service}" env:{env}'
+                        "query": query_string
                     },
                     "group_by": [
                         {
-                            "facet": "service",
+                            "facet": group_by_facet,
                             "limit": limit
                         }
                     ]
@@ -274,9 +275,9 @@ class DatadogClient:
         }
         
         print(f"{Fore.CYAN}[Request] POST {url}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}[Request] Query: @span.kind:client @peer.service:\"{service}\" env:{env}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}[Request] Query: {query_string}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}[Request] Time range: now-{time_period} to now{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}[Request] Grouping by: service (calling service){Style.RESET_ALL}")
+        print(f"{Fore.CYAN}[Request] Grouping by: {group_by_facet} (calling service){Style.RESET_ALL}")
         print(f"{Fore.CYAN}[Request] Counting: unique requests (cardinality of trace_id){Style.RESET_ALL}")
         print(f"{Fore.CYAN}[Request] Payload: {json.dumps(payload, indent=2)}{Style.RESET_ALL}")
         

@@ -10,22 +10,34 @@ Usage:
     python serviceConsumerAnalysis.py <input_file> <environment> <datadog_host> [auth_options] [filters]
 
 Authentication (choose one):
-    --api-key KEY --app-key KEY    Use API key authentication
+    --api-key KEY --app-key KEY    Use API key authentication (or read from ~/.datadog.cfg)
     --cookies COOKIES              Use cookie-based authentication (semicolon separated)
+    
+    If --api-key and --app-key are not provided and --cookies is not used,
+    credentials will be read from ~/.datadog.cfg (JSON format with "api-key" and "app-key" fields)
 
 Optional Filters:
     -t, --teams TEAMS              Process only these teams (comma-separated list)
     -a, --applications APPS        Process only these applications (comma-separated list)
 
 Examples:
-    # Using API keys, filter to one team
+    # Using credentials from ~/.datadog.cfg (recommended)
+    python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com
+    
+    # Using explicit API keys, filter to one team
     python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --api-key YOUR_API_KEY --app-key YOUR_APP_KEY -t Oktagon
     
     # Using cookie authentication, filter to one application
     python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --cookies "_dd_did=...; datadog-theme=light; dogweb=..." -a iam-service
     
-    # Filter to multiple teams and applications
-    python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com --cookies "..." -t "Oktagon,Identity" -a "iam-service,auth-service"
+    # Filter to multiple teams and applications (using config file for auth)
+    python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com -t "Oktagon,Identity" -a "iam-service,auth-service"
+
+Config File (~/.datadog.cfg):
+    {
+      "api-key": "your_datadog_api_key",
+      "app-key": "your_datadog_app_key"
+    }
 
 Output Reports:
     The script generates two types of reports in JSON format:
@@ -107,6 +119,10 @@ from colorama import init, Fore, Style
 # Initialize colorama for cross-platform colored output
 init(autoreset=True)
 
+# Retry configuration for 500 errors
+MAX_RETRIES_ON_500 = 3  # Number of times to retry on 500 Internal Server Error
+RETRY_DELAY_SECONDS = 30  # Delay in seconds between retries
+
 
 class DatadogClient:
     """Client for interacting with Datadog API with flexible authentication."""
@@ -136,6 +152,7 @@ class DatadogClient:
         self.last_request_time = 0
         self.rate_limit_total = None  # Will be set on first request
         self.rate_limit_validated = False
+        self.failed_500_errors = []  # Track services that failed with 500 after all retries
         
         # Validate that we have some form of authentication
         if not ((api_key and app_key) or cookies):
@@ -194,14 +211,20 @@ class DatadogClient:
                 reset_seconds = int(rate_limit_reset)
                 self._countdown_sleep(reset_seconds, f"Only {remaining} requests remaining (preserving {self.preserve_rate_limit}). Sleeping")
     
-    def _countdown_sleep(self, seconds: int, prefix: str = "Sleeping"):
-        """Sleep for the specified seconds with a countdown display."""
+    def _countdown_sleep(self, seconds: int, message: str = "Sleeping", context: str = "Rate Limit"):
+        """Sleep for the specified seconds with a countdown display.
+        
+        Args:
+            seconds: Number of seconds to sleep
+            message: Message to display during countdown
+            context: Context label (e.g., "Rate Limit", "Retry")
+        """
         import sys
         for remaining in range(seconds, 0, -1):
-            sys.stdout.write(f"\r{Fore.YELLOW}[Rate Limit] {prefix} {remaining}s until reset...{Style.RESET_ALL}   ")
+            sys.stdout.write(f"\r{Fore.YELLOW}[{context}] {message} {remaining}s...{Style.RESET_ALL}   ")
             sys.stdout.flush()
             time.sleep(1)
-        sys.stdout.write(f"\r{Fore.GREEN}[Rate Limit] Done waiting! Continuing...{Style.RESET_ALL}                              \n")
+        sys.stdout.write(f"\r{Fore.GREEN}[{context}] Done waiting! Continuing...{Style.RESET_ALL}                              \n")
         sys.stdout.flush()
     
     def _get_headers(self) -> Dict[str, str]:
@@ -220,7 +243,32 @@ class DatadogClient:
         
         return headers
     
-    def query_service_consumers(self, env: str, service: str, limit: int = 100, time_period: str = "1h") -> List[Dict]:
+    def save_errors_to_file(self, output_dir: str = '.') -> Optional[str]:
+        """
+        Save 500 errors to an errors.json file.
+        
+        Args:
+            output_dir: Directory to save the errors file
+            
+        Returns:
+            Path to the errors file if errors exist, None otherwise
+        """
+        if not self.failed_500_errors:
+            return None
+        
+        errors_file = f"{output_dir}/errors.json"
+        error_report = {
+            'total_errors': len(self.failed_500_errors),
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'errors': self.failed_500_errors
+        }
+        
+        with open(errors_file, 'w') as f:
+            json.dump(error_report, f, indent=2)
+        
+        return errors_file
+    
+    def query_service_consumers(self, env: str, service: str, limit: int = 100, time_period: str = "1h", retry_count: int = 0) -> List[Dict]:
         """
         Query Datadog for services that consume (call) the specified service.
         
@@ -229,6 +277,7 @@ class DatadogClient:
             service: Service name to find consumers for
             limit: Maximum number of results to return
             time_period: Time period to query (e.g., '1h', '4h', '1d', '1w')
+            retry_count: Internal parameter for tracking retry attempts on 500 errors
             
         Returns:
             List of consumer service information with call counts
@@ -304,8 +353,8 @@ class DatadogClient:
                 return []
             
             if response.status_code == 429:
-                print(f"{Fore.YELLOW}[Response] Rate limit hit (429). Waiting 5 seconds...{Style.RESET_ALL}")
-                time.sleep(5)
+                print(f"{Fore.YELLOW}[Rate Limit] Rate limit hit (429){Style.RESET_ALL}")
+                self._countdown_sleep(5, "Rate limit exceeded, waiting", "Rate Limit")
                 return self.query_service_consumers(env, service, limit, time_period)
             
             if response.status_code == 404:
@@ -346,8 +395,8 @@ class DatadogClient:
                     self._check_rate_limit_headers(page_response)
                     
                     if page_response.status_code == 429:
-                        print(f"{Fore.YELLOW}[Pagination] Rate limit hit (429). Waiting 10 seconds...{Style.RESET_ALL}")
-                        time.sleep(10)
+                        print(f"{Fore.YELLOW}[Pagination] Rate limit hit (429){Style.RESET_ALL}")
+                        self._countdown_sleep(10, "Rate limit on pagination, waiting", "Pagination")
                         continue  # Retry this page
                     
                     if page_response.status_code != 200:
@@ -365,6 +414,32 @@ class DatadogClient:
                 
                 print(f"{Fore.GREEN}[Pagination] Total consumers collected: {len(all_consumers)}{Style.RESET_ALL}")
                 return all_consumers
+            
+            # Handle 500 Internal Server Error with retries
+            if response.status_code == 500:
+                if retry_count < MAX_RETRIES_ON_500:
+                    print(f"{Fore.YELLOW}[Retry] 500 Internal Server Error - Attempt {retry_count + 1}/{MAX_RETRIES_ON_500}{Style.RESET_ALL}")
+                    print(f"{Fore.YELLOW}[Retry] Body: {response.text[:500]}{Style.RESET_ALL}")
+                    self._countdown_sleep(RETRY_DELAY_SECONDS, "Waiting before retry", "Retry")
+                    return self.query_service_consumers(env, service, limit, time_period, retry_count + 1)
+                else:
+                    # Max retries reached - track this error
+                    error_details = {
+                        'service': service,
+                        'environment': env,
+                        'time_period': time_period,
+                        'query': query_string,
+                        'url': url,
+                        'error': '500 Internal Server Error',
+                        'status_code': 500,
+                        'attempts': MAX_RETRIES_ON_500 + 1,
+                        'response_body': response.text[:500],
+                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    self.failed_500_errors.append(error_details)
+                    print(f"{Fore.RED}[Response] 500 Internal Server Error - Max retries ({MAX_RETRIES_ON_500}) reached{Style.RESET_ALL}")
+                    print(f"{Fore.RED}[Response] Body: {response.text[:500]}{Style.RESET_ALL}")
+                    return []
             
             # Handle any other status code
             print(f"{Fore.YELLOW}[Response] Unexpected status: {response.status_code}{Style.RESET_ALL}")
@@ -408,8 +483,8 @@ class DatadogClient:
             print(f"{Fore.CYAN}[Response] Status: {response.status_code}{Style.RESET_ALL}")
             
             if response.status_code == 429:
-                print(f"{Fore.YELLOW}[Response] Rate limit hit (429) on trace search. Waiting 5 seconds...{Style.RESET_ALL}")
-                time.sleep(5)
+                print(f"{Fore.YELLOW}[Trace Search] Rate limit hit (429){Style.RESET_ALL}")
+                self._countdown_sleep(5, "Rate limit on trace search, waiting", "Trace Search")
                 return self._try_trace_search(env, service, limit, from_ts, to_ts)
             
             if response.status_code != 200:
@@ -972,6 +1047,41 @@ class ServiceConsumerAnalyzer:
         print(f"\n{Fore.GREEN}Generated summary report: {summary_filename}{Style.RESET_ALL}")
 
 
+def load_datadog_config():
+    """
+    Load Datadog credentials from ~/.datadog.cfg
+    
+    Returns:
+        Tuple of (api_key, app_key) or (None, None) if file doesn't exist or is invalid
+    """
+    import os
+    config_path = os.path.expanduser('~/.datadog.cfg')
+    
+    if not os.path.exists(config_path):
+        return None, None
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        api_key = config.get('api-key')
+        app_key = config.get('app-key')
+        
+        if api_key and app_key:
+            print(f"{Fore.CYAN}Loaded credentials from ~/.datadog.cfg{Style.RESET_ALL}")
+            return api_key, app_key
+        else:
+            print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg exists but missing 'api-key' or 'app-key' fields{Style.RESET_ALL}")
+            return None, None
+            
+    except json.JSONDecodeError as e:
+        print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg is not valid JSON: {e}{Style.RESET_ALL}")
+        return None, None
+    except Exception as e:
+        print(f"{Fore.YELLOW}Warning: Could not read ~/.datadog.cfg: {e}{Style.RESET_ALL}")
+        return None, None
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -985,12 +1095,10 @@ def main():
     parser.add_argument('environment', help='Environment to analyze (e.g., production, staging)')
     parser.add_argument('datadog_host', help='Datadog host URL (e.g., https://app.datadoghq.com)')
     
-    # Authentication options (mutually exclusive groups)
-    auth_group = parser.add_mutually_exclusive_group(required=True)
-    auth_group.add_argument('--api-key', help='Datadog API key (requires --app-key)')
-    auth_group.add_argument('--cookies', help='Cookie string (semicolon separated) for authentication')
-    
-    parser.add_argument('--app-key', help='Datadog application key (required with --api-key)')
+    # Authentication options (all optional - will read from ~/.datadog.cfg if not provided)
+    parser.add_argument('--api-key', help='Datadog API key (if not provided, reads from ~/.datadog.cfg)')
+    parser.add_argument('--app-key', help='Datadog application key (if not provided, reads from ~/.datadog.cfg)')
+    parser.add_argument('--cookies', help='Cookie string (semicolon separated) for authentication')
     
     # Optional arguments
     parser.add_argument('-t', '--teams', help='Optional: Process only these teams, comma-separated (e.g., "Oktagon,Identity")')
@@ -1004,11 +1112,24 @@ def main():
     
     args = parser.parse_args()
     
+    # Load credentials from config file if not provided via command line
+    if not args.cookies and not args.api_key and not args.app_key:
+        config_api_key, config_app_key = load_datadog_config()
+        if config_api_key and config_app_key:
+            args.api_key = config_api_key
+            args.app_key = config_app_key
+        else:
+            parser.error('Authentication required: provide --cookies OR (--api-key and --app-key) OR create ~/.datadog.cfg with credentials')
+    
     # Validate authentication combinations
     if args.api_key and not args.app_key:
         parser.error('--app-key is required when using --api-key')
     if args.app_key and not args.api_key:
         parser.error('--api-key is required when using --app-key')
+    
+    # Final check: ensure we have some form of authentication
+    if not args.cookies and not (args.api_key and args.app_key):
+        parser.error('Authentication required: provide --cookies OR (--api-key and --app-key) OR create ~/.datadog.cfg with credentials')
     
     # Validate preserve-rate-limit
     if args.preserve_rate_limit < 0:
@@ -1158,6 +1279,12 @@ def main():
         team_names=args.teams,
         application_names=args.applications
     )
+    
+    # Save errors to file if any 500 errors occurred
+    errors_file = datadog_client.save_errors_to_file(args.output_dir)
+    if errors_file:
+        print(f"\n{Fore.YELLOW}Warning: {len(datadog_client.failed_500_errors)} service(s) failed with 500 errors after retries{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Error details saved to: {errors_file}{Style.RESET_ALL}")
     
     print(f"\n{Fore.GREEN}Consumer analysis complete!{Style.RESET_ALL}")
 

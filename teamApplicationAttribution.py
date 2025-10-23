@@ -54,7 +54,13 @@ def parse_arguments():
         help="Request timeout in seconds (default: 30)"
     )
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    # Prepend https:// if not present
+    if not args.backstage_url.startswith(('http://', 'https://')):
+        args.backstage_url = f'https://{args.backstage_url}'
+    
+    return args
 
 
 def get_all_teams(backstage_url: str, timeout: int = 30) -> List[Dict]:
@@ -181,13 +187,23 @@ def extract_component_info(component: Dict) -> Dict:
     """
     metadata = component.get('metadata', {})
     spec = component.get('spec', {})
+    labels = metadata.get('labels', {})
+    
+    # Get system from spec, use platform from labels as fallback
+    system = spec.get('system', None)
+    platform = labels.get('platform', None)
+    product = labels.get('product', None)
+    business_unit = labels.get('business-unit', None)
     
     return {
         'name': metadata.get('name', 'Unknown'),
         'title': metadata.get('title', metadata.get('name', 'Unknown')),
         'type': spec.get('type', 'Unknown'),
         'lifecycle': spec.get('lifecycle', 'Unknown'),
-        'system': spec.get('system', None),
+        'system': system or platform,  # Use platform as fallback if system is not defined
+        'platform': platform,  # Also include platform explicitly
+        'product': product,  # Include product from labels
+        'business_unit': business_unit,  # Include business_unit from labels
         'description': metadata.get('description', '')
     }
 
@@ -439,14 +455,29 @@ def build_service_attribution(backstage_url: str, timeout: int = 30, single_team
 def save_to_json(data: Dict, output_file: str):
     """
     Save the application attribution data to a JSON file.
+    Sorts teams alphabetically and applications within each team alphabetically.
     
     Args:
         data: Application attribution dictionary
         output_file: Path to output JSON file
     """
     try:
+        # Sort teams alphabetically by team name
+        sorted_data = {}
+        for team_name in sorted(data.keys()):
+            team_data = data[team_name].copy()
+            
+            # Sort applications alphabetically by name within each team
+            if 'applications' in team_data and team_data['applications']:
+                team_data['applications'] = sorted(
+                    team_data['applications'],
+                    key=lambda app: app.get('name', '').lower()
+                )
+            
+            sorted_data[team_name] = team_data
+        
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            json.dump(sorted_data, f, indent=2, ensure_ascii=False)
         
         print(f"{Fore.GREEN}Successfully saved application attribution to {output_file}{Style.RESET_ALL}")
         

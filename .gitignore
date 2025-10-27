@@ -1,9 +1,12 @@
 __pycache__/
 .idea/
 .vscode/
+businessGroupings.txt
+diffs
 env*/
+requestCache/
 JiraTools.iml
-team_ticket_defaults.xlsx
 single_ticket_test.xlsx
+team_ticket_defaults.xlsx
 ~*
 *.json

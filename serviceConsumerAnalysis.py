@@ -36,8 +36,23 @@ Examples:
 Config File (~/.datadog.cfg):
     {
       "api-key": "your_datadog_api_key",
-      "app-key": "your_datadog_app_key"
+      "app-key": "your_datadog_app_key",
+      "service-mappings": [
+        {
+          "name": "unknown-service",
+          "business-unit": "us-business-unit",
+          "domain": "us-domain",
+          "platform": "us-platform",
+          "product": null,
+          "system": null
+        }
+      ]
     }
+    
+    The service-mappings section is optional and provides fallback domain assignments
+    for services that cannot be resolved through the attribution data. Each mapping
+    includes metadata like business-unit, domain, platform, product, and system.
+    This is useful for external services or services not in your team application catalog.
 
 Output Reports:
     The script generates two types of reports in JSON format:
@@ -112,6 +127,9 @@ import json
 import sys
 import requests
 import time
+import hashlib
+import os
+import glob
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from colorama import init, Fore, Style
@@ -123,13 +141,17 @@ init(autoreset=True)
 MAX_RETRIES_ON_500 = 3  # Number of times to retry on 500 Internal Server Error
 RETRY_DELAY_SECONDS = 30  # Delay in seconds between retries
 
+# Cache configuration
+CACHE_DIR = 'requestCache'
+CACHE_MAX_AGE_SECONDS = 86400  # 1 day (24 hours)
+
 
 class DatadogClient:
     """Client for interacting with Datadog API with flexible authentication."""
     
     def __init__(self, host: str, api_key: Optional[str] = None, app_key: Optional[str] = None, 
                  cookies: Optional[str] = None, timeout: int = 30, rate_limit_delay: float = 1.0, 
-                 preserve_rate_limit: int = 1):
+                 preserve_rate_limit: int = 1, use_cache: bool = True):
         """
         Initialize Datadog client with either API keys or cookie authentication.
         
@@ -141,6 +163,7 @@ class DatadogClient:
             timeout: Request timeout in seconds
             rate_limit_delay: Delay between requests in seconds
             preserve_rate_limit: Number of requests to preserve from rate limit (default: 1)
+            use_cache: Whether to use cached responses (default: True)
         """
         self.host = host.rstrip('/')
         self.api_key = api_key
@@ -153,6 +176,12 @@ class DatadogClient:
         self.rate_limit_total = None  # Will be set on first request
         self.rate_limit_validated = False
         self.failed_500_errors = []  # Track services that failed with 500 after all retries
+        self.use_cache = use_cache
+        
+        # Create cache directory if it doesn't exist
+        if not os.path.exists(CACHE_DIR):
+            os.makedirs(CACHE_DIR)
+            print(f"{Fore.CYAN}[Cache] Created cache directory: {CACHE_DIR}{Style.RESET_ALL}")
         
         # Validate that we have some form of authentication
         if not ((api_key and app_key) or cookies):
@@ -243,6 +272,113 @@ class DatadogClient:
         
         return headers
     
+    def _generate_cache_key(self, url: str, payload: Dict = None) -> str:
+        """
+        Generate a hash key for caching based on URL and payload.
+        
+        Args:
+            url: Request URL
+            payload: Request payload (for POST requests)
+            
+        Returns:
+            SHA256 hash of the request
+        """
+        cache_data = f"{url}:{json.dumps(payload, sort_keys=True) if payload else ''}"
+        return hashlib.sha256(cache_data.encode()).hexdigest()
+    
+    def _get_cached_response(self, cache_key: str) -> Optional[Dict]:
+        """
+        Get cached response if available and not expired.
+        
+        Args:
+            cache_key: Cache key (hash)
+            
+        Returns:
+            Cached response data or None if not found/expired
+        """
+        if not self.use_cache:
+            return None
+        
+        # Find cache files matching this key
+        pattern = f"{CACHE_DIR}/{cache_key}.*"
+        cache_files = glob.glob(pattern)
+        
+        if not cache_files:
+            return None
+        
+        # Get the most recent cache file based on timestamp in filename
+        def get_timestamp_from_filename(filepath):
+            try:
+                # Filename format: requestCache/hashkey.timestamp
+                # Hash is 64 hex chars, so split by '/' and take the part after the hash
+                filename = filepath.split('/')[-1]  # Get just the filename
+                # Split by first dot (after the 64-char hash)
+                parts = filename.split('.', 1)  # Split on first dot only
+                if len(parts) == 2:
+                    return float(parts[1])  # Everything after first dot is the timestamp
+                return 0
+            except (ValueError, IndexError):
+                return 0
+        
+        cache_file = max(cache_files, key=get_timestamp_from_filename)
+        
+        # Extract timestamp from filename (format: hashkey.timestamp)
+        try:
+            filename = cache_file.split('/')[-1]  # Get just the filename
+            parts = filename.split('.', 1)  # Split on first dot only
+            if len(parts) == 2:
+                cache_time = float(parts[1])  # Everything after first dot is the timestamp
+            else:
+                raise ValueError("Invalid filename format")
+        except (ValueError, IndexError):
+            print(f"{Fore.YELLOW}[Cache] Invalid cache filename format: {cache_file}{Style.RESET_ALL}")
+            return None
+        
+        # Check if cache is expired
+        age_seconds = time.time() - cache_time
+        if age_seconds > CACHE_MAX_AGE_SECONDS:
+            print(f"{Fore.YELLOW}[Cache] Cache expired (age: {age_seconds/3600:.1f}h), deleting: {cache_file}{Style.RESET_ALL}")
+            os.remove(cache_file)
+            return None
+        
+        # Read and return cached data
+        try:
+            with open(cache_file, 'r') as f:
+                cached_data = json.load(f)
+            print(f"{Fore.GREEN}[Cache] Using cached response (age: {age_seconds/3600:.1f}h){Style.RESET_ALL}")
+            return cached_data
+        except Exception as e:
+            print(f"{Fore.YELLOW}[Cache] Error reading cache file: {e}{Style.RESET_ALL}")
+            return None
+    
+    def _save_to_cache(self, cache_key: str, data: Dict):
+        """
+        Save response data to cache.
+        
+        Args:
+            cache_key: Cache key (hash)
+            data: Response data to cache
+        """
+        # Delete old cache files with this key
+        pattern = f"{CACHE_DIR}/{cache_key}.*"
+        old_files = glob.glob(pattern)
+        for old_file in old_files:
+            try:
+                os.remove(old_file)
+                print(f"{Fore.CYAN}[Cache] Deleted old cache: {old_file}{Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.YELLOW}[Cache] Error deleting old cache: {e}{Style.RESET_ALL}")
+        
+        # Save new cache file with current timestamp
+        timestamp = time.time()
+        cache_file = f"{CACHE_DIR}/{cache_key}.{timestamp}"
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(data, f)
+            print(f"{Fore.GREEN}[Cache] Saved to cache: {cache_file}{Style.RESET_ALL}")
+        except Exception as e:
+            print(f"{Fore.YELLOW}[Cache] Error saving to cache: {e}{Style.RESET_ALL}")
+    
     def save_errors_to_file(self, output_dir: str = '.') -> Optional[str]:
         """
         Save 500 errors to an errors.json file.
@@ -282,9 +418,6 @@ class DatadogClient:
         Returns:
             List of consumer service information with call counts
         """
-        # Apply rate limiting
-        self._rate_limit()
-        
         # Use trace analytics to find which services are calling this service
         # This queries for traces where the target service is being called and groups by the calling service
         url = f"{self.host}/api/v2/spans/analytics/aggregate"
@@ -322,6 +455,18 @@ class DatadogClient:
                 "type": "aggregate_request"
             }
         }
+        
+        # Generate cache key
+        cache_key = self._generate_cache_key(url, payload)
+        
+        # Check cache first
+        cached_response = self._get_cached_response(cache_key)
+        if cached_response is not None:
+            # Parse cached data and return
+            return self._parse_analytics_response(cached_response)
+        
+        # Apply rate limiting (only if making actual request)
+        self._rate_limit()
         
         print(f"{Fore.CYAN}[Request] POST {url}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}[Request] Query: {query_string}{Style.RESET_ALL}")
@@ -366,6 +511,9 @@ class DatadogClient:
                 print(f"{Fore.GREEN}[Response] Success - parsing analytics response{Style.RESET_ALL}")
                 print(f"{Fore.CYAN}[Response] Response keys: {list(data.keys())}{Style.RESET_ALL}")
                 print(f"{Fore.CYAN}[Response] Full response: {json.dumps(data, indent=2)[:2000]}{Style.RESET_ALL}")
+                
+                # Save to cache
+                self._save_to_cache(cache_key, data)
                 
                 # Parse the analytics API response format and collect results
                 all_consumers = self._parse_analytics_response(data)
@@ -756,7 +904,7 @@ class DatadogClient:
 class ServiceConsumerAnalyzer:
     """Analyzes service consumers and generates reports."""
     
-    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None):
+    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None, service_mappings: Dict = None):
         """
         Initialize analyzer.
         
@@ -767,12 +915,14 @@ class ServiceConsumerAnalyzer:
             time_period: Time period to query (e.g., 1h, 4h, 1d, 1w)
             application_filters: List of application name filters (normalized, lowercase) - no longer used for queries
             full_attribution_data: Complete unfiltered attribution data for domain lookups
+            service_mappings: Service mappings from config file for external service domain resolution
         """
         self.attribution_data = attribution_data
         self.datadog_client = datadog_client
         self.environment = environment
         self.time_period = time_period
         self.application_filters = application_filters or []  # Store the list of application filters
+        self.service_mappings = service_mappings or {}  # Store service mappings from config
         
         # Build reverse lookup maps from full data (or filtered if full not provided)
         self.service_to_team = {}  # service_name -> team_info
@@ -796,6 +946,76 @@ class ServiceConsumerAnalyzer:
                 if service_name:
                     self.service_to_team[service_name] = team_info
                     self.service_to_system[service_name] = system
+    
+    def _lookup_service_with_fallback(self, service_name: str) -> tuple:
+        """
+        Try to find a service in attribution data with fuzzy matching.
+        
+        Lookup order:
+        1. Exact match
+        2. Remove '-service' suffix and try again
+        3. Replace dashes with spaces and try again
+        4. Remove ' service' suffix from space-replaced version
+        
+        Args:
+            service_name: Name of the service
+            
+        Returns:
+            Tuple of (team_info, found_name) or (None, None) if not found
+        """
+        # Try exact match first
+        if service_name in self.service_to_team:
+            return self.service_to_team[service_name], service_name
+        
+        # Try removing '-service' suffix
+        if service_name.endswith('-service'):
+            variant = service_name[:-8]  # Remove '-service'
+            if variant in self.service_to_team:
+                return self.service_to_team[variant], variant
+        
+        # Try replacing dashes with spaces
+        variant_spaces = service_name.replace('-', ' ')
+        if variant_spaces != service_name and variant_spaces in self.service_to_team:
+            return self.service_to_team[variant_spaces], variant_spaces
+        
+        # Try removing ' service' suffix from space-replaced version
+        if variant_spaces.endswith(' service'):
+            variant_no_suffix = variant_spaces[:-8]  # Remove ' service'
+            if variant_no_suffix in self.service_to_team:
+                return self.service_to_team[variant_no_suffix], variant_no_suffix
+        
+        return None, None
+    
+    def _get_domain_for_service(self, service_name: str) -> str:
+        """
+        Get domain for a service, using config fallback and fuzzy matching if needed.
+        
+        Resolution order:
+        1. Check attribution data with fuzzy matching (exact, -service, dashes->spaces, etc.)
+        2. Check service-mappings from config
+        3. Default to 'External/Unknown'
+        
+        Args:
+            service_name: Name of the service
+            
+        Returns:
+            Domain name or 'External/Unknown'
+        """
+        # First try the attribution data with fuzzy matching
+        team_info, _ = self._lookup_service_with_fallback(service_name)
+        if team_info:
+            domain = team_info.get('domain')
+            if domain and domain.lower() not in ['', 'unknown', 'null']:
+                return domain
+        
+        # Fallback to service mappings from config
+        if service_name in self.service_mappings:
+            mapping = self.service_mappings[service_name]
+            domain = mapping.get('domain')
+            if domain and domain.lower() not in ['', 'unknown', 'null']:
+                return domain
+        
+        return 'External/Unknown'
     
     def analyze_all_teams(self) -> Dict:
         """
@@ -847,41 +1067,24 @@ class ServiceConsumerAnalyzer:
                     if consumer_service == service_name:
                         continue
                     
-                    # Lookup consumer's team/domain
-                    consumer_team_info = self.service_to_team.get(consumer_service)
+                    # Get domain for this consumer service (with fallback to config)
+                    consumer_domain = self._get_domain_for_service(consumer_service)
                     
-                    if consumer_team_info:
-                        consumer_domain = consumer_team_info.get('domain', 'Unknown')
-                        
-                        # Aggregate by domain
-                        domain_consumers[team_domain][consumer_domain] += call_count
-                        
-                        # Aggregate by system
-                        system_consumers[team_domain][system] += call_count
-                        
-                        # Track system details (services within each system)
-                        system_details[team_domain][system][service_name] += call_count
-                        
-                        # Track details
-                        domain_details[team_domain][consumer_domain].append({
-                            'target_service': service_name,
-                            'calling_service': consumer_service,
-                            'count': call_count
-                        })
-                    else:
-                        # Consumer not in our attribution map
-                        domain_consumers[team_domain]['External/Unknown'] += call_count
-                        system_consumers[team_domain][system] += call_count
-                        
-                        # Track system details (services within each system)
-                        system_details[team_domain][system][service_name] += call_count
-                        
-                        # Track details for external/unknown
-                        domain_details[team_domain]['External/Unknown'].append({
-                            'target_service': service_name,
-                            'calling_service': consumer_service,
-                            'count': call_count
-                        })
+                    # Aggregate by domain
+                    domain_consumers[team_domain][consumer_domain] += call_count
+                    
+                    # Aggregate by system
+                    system_consumers[team_domain][system] += call_count
+                    
+                    # Track system details (services within each system)
+                    system_details[team_domain][system][service_name] += call_count
+                    
+                    # Track details
+                    domain_details[team_domain][consumer_domain].append({
+                        'target_service': service_name,
+                        'calling_service': consumer_service,
+                        'count': call_count
+                    })
                 
                 print(f"    Found {len(consumers)} consumers")
         
@@ -1049,16 +1252,32 @@ class ServiceConsumerAnalyzer:
 
 def load_datadog_config():
     """
-    Load Datadog credentials from ~/.datadog.cfg
+    Load Datadog credentials and optional service mappings from ~/.datadog.cfg
     
     Returns:
-        Tuple of (api_key, app_key) or (None, None) if file doesn't exist or is invalid
+        Tuple of (api_key, app_key, service_mappings) or (None, None, {}) if file doesn't exist or is invalid
+        
+    Expected config format:
+    {
+      "api-key": "your_datadog_api_key",
+      "app-key": "your_datadog_app_key",
+      "service-mappings": [
+        {
+          "name": "unknown-service-1",
+          "business-unit": "US1-business-unit",
+          "domain": "US1-domain",
+          "platform": "US1-platform",
+          "product": null,
+          "system": null
+        }
+      ]
+    }
     """
     import os
     config_path = os.path.expanduser('~/.datadog.cfg')
     
     if not os.path.exists(config_path):
-        return None, None
+        return None, None, {}
     
     try:
         with open(config_path, 'r') as f:
@@ -1067,19 +1286,35 @@ def load_datadog_config():
         api_key = config.get('api-key')
         app_key = config.get('app-key')
         
+        # Convert service-mappings array to a dictionary keyed by service name
+        service_mappings_list = config.get('service-mappings', [])
+        service_mappings = {}
+        for mapping in service_mappings_list:
+            service_name = mapping.get('name')
+            if service_name:
+                service_mappings[service_name] = {
+                    'business-unit': mapping.get('business-unit'),
+                    'domain': mapping.get('domain'),
+                    'platform': mapping.get('platform'),
+                    'product': mapping.get('product'),
+                    'system': mapping.get('system')
+                }
+        
         if api_key and app_key:
             print(f"{Fore.CYAN}Loaded credentials from ~/.datadog.cfg{Style.RESET_ALL}")
-            return api_key, app_key
+            if service_mappings:
+                print(f"{Fore.CYAN}Loaded {len(service_mappings)} service mapping(s) from ~/.datadog.cfg{Style.RESET_ALL}")
+            return api_key, app_key, service_mappings
         else:
             print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg exists but missing 'api-key' or 'app-key' fields{Style.RESET_ALL}")
-            return None, None
+            return None, None, service_mappings
             
     except json.JSONDecodeError as e:
         print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg is not valid JSON: {e}{Style.RESET_ALL}")
-        return None, None
+        return None, None, {}
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Could not read ~/.datadog.cfg: {e}{Style.RESET_ALL}")
-        return None, None
+        return None, None, {}
 
 
 def main():
@@ -1109,17 +1344,22 @@ def main():
     parser.add_argument('--limit', type=int, default=100, help='Max consumers per service (default: 100)')
     parser.add_argument('--time-period', default='1h', help='Time period to query (e.g., 1h, 4h, 1d, 1w) (default: 1h)')
     parser.add_argument('--output-dir', default='.', help='Output directory for reports (default: current directory)')
+    parser.add_argument('--nocache', action='store_true', help='Disable using cached responses (still updates cache)')
     
     args = parser.parse_args()
     
-    # Load credentials from config file if not provided via command line
+    # Load credentials and service mappings from config file if not provided via command line
+    service_mappings = {}
     if not args.cookies and not args.api_key and not args.app_key:
-        config_api_key, config_app_key = load_datadog_config()
+        config_api_key, config_app_key, service_mappings = load_datadog_config()
         if config_api_key and config_app_key:
             args.api_key = config_api_key
             args.app_key = config_app_key
         else:
             parser.error('Authentication required: provide --cookies OR (--api-key and --app-key) OR create ~/.datadog.cfg with credentials')
+    else:
+        # Still load service mappings even if auth is provided via CLI
+        _, _, service_mappings = load_datadog_config()
     
     # Validate authentication combinations
     if args.api_key and not args.app_key:
@@ -1249,6 +1489,13 @@ def main():
     print(f"{Fore.CYAN}Rate limit delay: {args.rate_limit} seconds between requests{Style.RESET_ALL}")
     print(f"{Fore.CYAN}Preserve rate limit: {args.preserve_rate_limit} request(s){Style.RESET_ALL}")
     
+    # Determine cache usage
+    use_cache = not args.nocache
+    if args.nocache:
+        print(f"{Fore.YELLOW}Cache: Disabled (will still update cache){Style.RESET_ALL}")
+    else:
+        print(f"{Fore.CYAN}Cache: Enabled (max age: {CACHE_MAX_AGE_SECONDS/3600:.1f}h){Style.RESET_ALL}")
+    
     datadog_client = DatadogClient(
         host=args.datadog_host,
         api_key=args.api_key,
@@ -1256,7 +1503,8 @@ def main():
         cookies=args.cookies,
         timeout=args.timeout,
         rate_limit_delay=args.rate_limit,
-        preserve_rate_limit=args.preserve_rate_limit
+        preserve_rate_limit=args.preserve_rate_limit,
+        use_cache=use_cache
     )
     
     # Initialize analyzer
@@ -1266,7 +1514,8 @@ def main():
         environment=args.environment,
         time_period=args.time_period,
         application_filters=app_filters,  # Pass the list of application filters
-        full_attribution_data=full_attribution_data  # Pass full data for domain lookups
+        full_attribution_data=full_attribution_data,  # Pass full data for domain lookups
+        service_mappings=service_mappings  # Pass service mappings from config
     )
     
     # Run analysis

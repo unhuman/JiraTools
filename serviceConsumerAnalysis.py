@@ -1059,10 +1059,12 @@ class ServiceConsumerAnalyzer:
         Get domain for a service, using config fallback and fuzzy matching if needed.
         
         Resolution order:
-        1. Check application-alias mapping (if aliased, use the alias for lookup)
+        1. Check application-assignments from config first (explicit configuration takes priority)
+           - Check if service has an alias, try the alias first
+           - Then try the original service name
         2. Check attribution data with fuzzy matching (exact, -service, dashes->spaces, etc.)
-        3. Check application-assignments from config (check alias first, then original name)
-        4. Default to 'External/Unknown'
+           - Handles application-alias mapping internally
+        3. Default to 'External/Unknown'
         
         Args:
             service_name: Name of the service
@@ -1070,14 +1072,7 @@ class ServiceConsumerAnalyzer:
         Returns:
             Domain name or 'External/Unknown'
         """
-        # First try the attribution data with fuzzy matching (handles aliases internally)
-        team_info, _ = self._lookup_service_with_fallback(service_name)
-        if team_info:
-            domain = team_info.get('domain')
-            if domain and domain.lower() not in ['', 'unknown', 'null']:
-                return domain
-        
-        # Fallback to service mappings from config
+        # FIRST: Check application-assignments from config (explicit config takes priority)
         # Check if service has an alias, and try the alias first
         lookup_name = self.application_aliases.get(service_name, service_name)
         if lookup_name in self.service_mappings:
@@ -1093,6 +1088,14 @@ class ServiceConsumerAnalyzer:
             if domain and domain.lower() not in ['', 'unknown', 'null']:
                 return domain
         
+        # SECOND: Try the attribution data with fuzzy matching (handles aliases internally)
+        team_info, _ = self._lookup_service_with_fallback(service_name)
+        if team_info:
+            domain = team_info.get('domain')
+            if domain and domain.lower() not in ['', 'unknown', 'null']:
+                return domain
+        
+        # LAST: Default to External/Unknown
         return 'External/Unknown'
     
     def analyze_all_teams(self) -> Dict:
@@ -1161,21 +1164,33 @@ class ServiceConsumerAnalyzer:
                     # Get domain for this consumer service (with fallback to config)
                     consumer_domain = self._get_domain_for_service(consumer_service)
                     
-                    # Aggregate by domain
-                    domain_consumers[team_domain][consumer_domain] += call_count
-                    
-                    # Aggregate by system
-                    system_consumers[team_domain][system] += call_count
-                    
-                    # Track system details (services within each system)
-                    system_details[team_domain][system][service_name] += call_count
-                    
-                    # Track details
-                    domain_details[team_domain][consumer_domain].append({
-                        'target_service': service_name,
-                        'calling_service': consumer_service,
-                        'count': call_count
-                    })
+                    # For External/Unknown services, don't add to totals but preserve details
+                    if consumer_domain == 'External/Unknown':
+                        # Add 0 to aggregates (don't affect totals)
+                        domain_consumers[team_domain][consumer_domain] += 0
+                        # Still track details but with actual count for reference
+                        domain_details[team_domain][consumer_domain].append({
+                            'target_service': service_name,
+                            'calling_service': consumer_service,
+                            'count': call_count  # Preserve actual count in details
+                        })
+                    else:
+                        # Normal aggregation for known services
+                        # Aggregate by domain
+                        domain_consumers[team_domain][consumer_domain] += call_count
+                        
+                        # Aggregate by system
+                        system_consumers[team_domain][system] += call_count
+                        
+                        # Track system details (services within each system)
+                        system_details[team_domain][system][service_name] += call_count
+                        
+                        # Track details
+                        domain_details[team_domain][consumer_domain].append({
+                            'target_service': service_name,
+                            'calling_service': consumer_service,
+                            'count': call_count
+                        })
                 
                 print(f"    Found {len(consumers)} consumers")
         

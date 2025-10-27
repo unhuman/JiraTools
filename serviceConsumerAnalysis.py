@@ -37,7 +37,16 @@ Config File (~/.datadog.cfg):
     {
       "api-key": "your_datadog_api_key",
       "app-key": "your_datadog_app_key",
-      "service-mappings": [
+      "application-alias": {
+        "service1": "service2",
+        "another-service": "canonical-service"
+      },
+      "skip-applications": [
+        "test-service",
+        "deprecated-service",
+        "internal-tool"
+      ],
+      "application-assignments": [
         {
           "name": "unknown-service",
           "business-unit": "us-business-unit",
@@ -49,7 +58,17 @@ Config File (~/.datadog.cfg):
       ]
     }
     
-    The service-mappings section is optional and provides fallback domain assignments
+    The application-alias section is optional and allows services to use metadata from
+    another service while maintaining their own identity. For example, if "service1" is
+    aliased to "service2", lookups for "service1" will use all the business-unit, domain,
+    platform, product, and system data from "service2", but the service will still be
+    identified as "service1" in reports.
+    
+    The skip-applications section is optional and lists applications to completely exclude
+    from processing. Any calls involving these services (either as caller or callee) will
+    be ignored and will not affect totals, percentages, or any aggregated data.
+    
+    The application-assignments section is optional and provides fallback domain assignments
     for services that cannot be resolved through the attribution data. Each mapping
     includes metadata like business-unit, domain, platform, product, and system.
     This is useful for external services or services not in your team application catalog.
@@ -904,7 +923,7 @@ class DatadogClient:
 class ServiceConsumerAnalyzer:
     """Analyzes service consumers and generates reports."""
     
-    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None, service_mappings: Dict = None):
+    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None, service_mappings: Dict = None, application_aliases: Dict = None, skip_applications: List = None):
         """
         Initialize analyzer.
         
@@ -916,6 +935,8 @@ class ServiceConsumerAnalyzer:
             application_filters: List of application name filters (normalized, lowercase) - no longer used for queries
             full_attribution_data: Complete unfiltered attribution data for domain lookups
             service_mappings: Service mappings from config file for external service domain resolution
+            application_aliases: Application alias mappings from config file (key=service, value=alias_to_use_for_data)
+            skip_applications: List of application names to completely exclude from processing
         """
         self.attribution_data = attribution_data
         self.datadog_client = datadog_client
@@ -923,6 +944,8 @@ class ServiceConsumerAnalyzer:
         self.time_period = time_period
         self.application_filters = application_filters or []  # Store the list of application filters
         self.service_mappings = service_mappings or {}  # Store service mappings from config
+        self.application_aliases = application_aliases or {}  # Store application aliases from config
+        self.skip_applications = set(skip_applications or [])  # Store as set for O(1) lookup
         
         # Build reverse lookup maps from full data (or filtered if full not provided)
         self.service_to_team = {}  # service_name -> team_info
@@ -930,7 +953,11 @@ class ServiceConsumerAnalyzer:
         self._build_lookup_maps(full_attribution_data or attribution_data)
     
     def _build_lookup_maps(self, data_source: Dict):
-        """Build reverse lookup maps from service name to team and system."""
+        """Build reverse lookup maps from service name to team and system.
+        
+        Stores both original and lowercase versions of service names and titles
+        to support case-insensitive fuzzy matching.
+        """
         for team_name, team_data in data_source.items():
             team_info = {
                 'team_name': team_data.get('team_name'),
@@ -941,21 +968,38 @@ class ServiceConsumerAnalyzer:
             
             for app in team_data.get('applications', []):
                 service_name = app.get('name')
+                title = app.get('title')
                 system = app.get('system')
                 
                 if service_name:
+                    # Store original case
                     self.service_to_team[service_name] = team_info
                     self.service_to_system[service_name] = system
+                    # Store lowercase for case-insensitive matching
+                    self.service_to_team[service_name.lower()] = team_info
+                    self.service_to_system[service_name.lower()] = system
+                
+                # Also add title as an alternative lookup key (if different from name)
+                if title and title != service_name:
+                    # Store original case
+                    self.service_to_team[title] = team_info
+                    self.service_to_system[title] = system
+                    # Store lowercase for case-insensitive matching
+                    self.service_to_team[title.lower()] = team_info
+                    self.service_to_system[title.lower()] = system
     
     def _lookup_service_with_fallback(self, service_name: str) -> tuple:
         """
         Try to find a service in attribution data with fuzzy matching.
         
         Lookup order:
-        1. Exact match
-        2. Remove '-service' suffix and try again
-        3. Replace dashes with spaces and try again
-        4. Remove ' service' suffix from space-replaced version
+        1. Check application-alias mapping (if service is aliased, look up the alias)
+        2. Exact match
+        3. Remove '-service' suffix and try again
+        4. Remove '-http-client' suffix and try again
+        5. Remove '-lambda' suffix and try again
+        6. Replace dashes with spaces and try again
+        7. Remove ' service' suffix from space-replaced version
         
         Args:
             service_name: Name of the service
@@ -963,20 +1007,44 @@ class ServiceConsumerAnalyzer:
         Returns:
             Tuple of (team_info, found_name) or (None, None) if not found
         """
-        # Try exact match first
-        if service_name in self.service_to_team:
-            return self.service_to_team[service_name], service_name
+        # Check if this service has an alias defined in the config
+        # If so, use the aliased service's data but preserve the original service name
+        lookup_name = service_name
+        if service_name in self.application_aliases:
+            lookup_name = self.application_aliases[service_name]
+            print(f"{Fore.CYAN}[Alias] Service '{service_name}' aliased to '{lookup_name}' for data lookup{Style.RESET_ALL}")
+        
+        # Try exact match first (using lookup_name which may be the alias)
+        if lookup_name in self.service_to_team:
+            return self.service_to_team[lookup_name], lookup_name
         
         # Try removing '-service' suffix
-        if service_name.endswith('-service'):
-            variant = service_name[:-8]  # Remove '-service'
+        if lookup_name.endswith('-service'):
+            variant = lookup_name[:-8]  # Remove '-service'
+            if variant in self.service_to_team:
+                return self.service_to_team[variant], variant
+        
+        # Try removing '-http-client' suffix
+        if lookup_name.endswith('-http-client'):
+            variant = lookup_name[:-12]  # Remove '-http-client'
+            if variant in self.service_to_team:
+                return self.service_to_team[variant], variant
+        
+        # Try removing '-lambda' suffix
+        if lookup_name.endswith('-lambda'):
+            variant = lookup_name[:-7]  # Remove '-lambda'
             if variant in self.service_to_team:
                 return self.service_to_team[variant], variant
         
         # Try replacing dashes with spaces
-        variant_spaces = service_name.replace('-', ' ')
-        if variant_spaces != service_name and variant_spaces in self.service_to_team:
+        variant_spaces = lookup_name.replace('-', ' ')
+        if variant_spaces != lookup_name and variant_spaces in self.service_to_team:
             return self.service_to_team[variant_spaces], variant_spaces
+        
+        # Try lowercase version of space-replaced variant
+        variant_spaces_lower = variant_spaces.lower()
+        if variant_spaces_lower != variant_spaces and variant_spaces_lower in self.service_to_team:
+            return self.service_to_team[variant_spaces_lower], variant_spaces_lower
         
         # Try removing ' service' suffix from space-replaced version
         if variant_spaces.endswith(' service'):
@@ -991,9 +1059,10 @@ class ServiceConsumerAnalyzer:
         Get domain for a service, using config fallback and fuzzy matching if needed.
         
         Resolution order:
-        1. Check attribution data with fuzzy matching (exact, -service, dashes->spaces, etc.)
-        2. Check service-mappings from config
-        3. Default to 'External/Unknown'
+        1. Check application-alias mapping (if aliased, use the alias for lookup)
+        2. Check attribution data with fuzzy matching (exact, -service, dashes->spaces, etc.)
+        3. Check application-assignments from config (check alias first, then original name)
+        4. Default to 'External/Unknown'
         
         Args:
             service_name: Name of the service
@@ -1001,7 +1070,7 @@ class ServiceConsumerAnalyzer:
         Returns:
             Domain name or 'External/Unknown'
         """
-        # First try the attribution data with fuzzy matching
+        # First try the attribution data with fuzzy matching (handles aliases internally)
         team_info, _ = self._lookup_service_with_fallback(service_name)
         if team_info:
             domain = team_info.get('domain')
@@ -1009,7 +1078,16 @@ class ServiceConsumerAnalyzer:
                 return domain
         
         # Fallback to service mappings from config
-        if service_name in self.service_mappings:
+        # Check if service has an alias, and try the alias first
+        lookup_name = self.application_aliases.get(service_name, service_name)
+        if lookup_name in self.service_mappings:
+            mapping = self.service_mappings[lookup_name]
+            domain = mapping.get('domain')
+            if domain and domain.lower() not in ['', 'unknown', 'null']:
+                return domain
+        
+        # If alias didn't work, try the original service name
+        if lookup_name != service_name and service_name in self.service_mappings:
             mapping = self.service_mappings[service_name]
             domain = mapping.get('domain')
             if domain and domain.lower() not in ['', 'unknown', 'null']:
@@ -1033,8 +1111,11 @@ class ServiceConsumerAnalyzer:
         total_services = sum(len(team_data.get('applications', [])) 
                            for team_data in self.attribution_data.values())
         processed = 0
+        skipped = 0
         
         print(f"\n{Fore.CYAN}Starting consumer analysis for {total_services} services...{Style.RESET_ALL}\n")
+        if self.skip_applications:
+            print(f"{Fore.YELLOW}Skipping {len(self.skip_applications)} application(s): {', '.join(sorted(self.skip_applications))}{Style.RESET_ALL}\n")
         
         for team_name, team_data in self.attribution_data.items():
             team_domain = team_data.get('domain', 'Unknown')
@@ -1048,6 +1129,12 @@ class ServiceConsumerAnalyzer:
                 service_name = app.get('name')
                 system = app.get('system', 'Unknown')
                 processed += 1
+                
+                # Skip if this service is in the skip list
+                if service_name in self.skip_applications:
+                    skipped += 1
+                    print(f"  [{processed}/{total_services}] Skipping: {service_name} (in skip-applications list)")
+                    continue
                 
                 print(f"  [{processed}/{total_services}] Querying consumers for: {service_name}")
                 
@@ -1065,6 +1152,10 @@ class ServiceConsumerAnalyzer:
                     
                     # Skip self-calls (service calling itself)
                     if consumer_service == service_name:
+                        continue
+                    
+                    # Skip if the calling service is in the skip list
+                    if consumer_service in self.skip_applications:
                         continue
                     
                     # Get domain for this consumer service (with fallback to config)
@@ -1087,6 +1178,9 @@ class ServiceConsumerAnalyzer:
                     })
                 
                 print(f"    Found {len(consumers)} consumers")
+        
+        if skipped > 0:
+            print(f"\n{Fore.YELLOW}Skipped {skipped} application(s) from skip-applications list{Style.RESET_ALL}\n")
         
         return {
             'domain_consumers': dict(domain_consumers),
@@ -1252,16 +1346,24 @@ class ServiceConsumerAnalyzer:
 
 def load_datadog_config():
     """
-    Load Datadog credentials and optional service mappings from ~/.datadog.cfg
+    Load Datadog credentials, optional application aliases, skip list, and service mappings from ~/.datadog.cfg
     
     Returns:
-        Tuple of (api_key, app_key, service_mappings) or (None, None, {}) if file doesn't exist or is invalid
+        Tuple of (api_key, app_key, application_aliases, skip_applications, service_mappings) or (None, None, {}, [], {}) if file doesn't exist or is invalid
         
     Expected config format:
     {
       "api-key": "your_datadog_api_key",
       "app-key": "your_datadog_app_key",
-      "service-mappings": [
+      "application-alias": {
+        "service1": "service2",
+        "another-service": "canonical-service"
+      },
+      "skip-applications": [
+        "test-service",
+        "deprecated-service"
+      ],
+      "application-assignments": [
         {
           "name": "unknown-service-1",
           "business-unit": "US1-business-unit",
@@ -1277,7 +1379,7 @@ def load_datadog_config():
     config_path = os.path.expanduser('~/.datadog.cfg')
     
     if not os.path.exists(config_path):
-        return None, None, {}
+        return None, None, {}, [], {}
     
     try:
         with open(config_path, 'r') as f:
@@ -1286,8 +1388,14 @@ def load_datadog_config():
         api_key = config.get('api-key')
         app_key = config.get('app-key')
         
-        # Convert service-mappings array to a dictionary keyed by service name
-        service_mappings_list = config.get('service-mappings', [])
+        # Load application-alias mappings (key=service, value=alias_to_use)
+        application_aliases = config.get('application-alias', {})
+        
+        # Load skip-applications list
+        skip_applications = config.get('skip-applications', [])
+        
+        # Convert application-assignments array to a dictionary keyed by service name
+        service_mappings_list = config.get('application-assignments', [])
         service_mappings = {}
         for mapping in service_mappings_list:
             service_name = mapping.get('name')
@@ -1302,19 +1410,23 @@ def load_datadog_config():
         
         if api_key and app_key:
             print(f"{Fore.CYAN}Loaded credentials from ~/.datadog.cfg{Style.RESET_ALL}")
+            if application_aliases:
+                print(f"{Fore.CYAN}Loaded {len(application_aliases)} application alias(es) from ~/.datadog.cfg{Style.RESET_ALL}")
+            if skip_applications:
+                print(f"{Fore.CYAN}Loaded {len(skip_applications)} skip application(s) from ~/.datadog.cfg{Style.RESET_ALL}")
             if service_mappings:
                 print(f"{Fore.CYAN}Loaded {len(service_mappings)} service mapping(s) from ~/.datadog.cfg{Style.RESET_ALL}")
-            return api_key, app_key, service_mappings
+            return api_key, app_key, application_aliases, skip_applications, service_mappings
         else:
             print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg exists but missing 'api-key' or 'app-key' fields{Style.RESET_ALL}")
-            return None, None, service_mappings
+            return None, None, application_aliases, skip_applications, service_mappings
             
     except json.JSONDecodeError as e:
         print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg is not valid JSON: {e}{Style.RESET_ALL}")
-        return None, None, {}
+        return None, None, {}, [], {}
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Could not read ~/.datadog.cfg: {e}{Style.RESET_ALL}")
-        return None, None, {}
+        return None, None, {}, [], {}
 
 
 def main():
@@ -1348,18 +1460,20 @@ def main():
     
     args = parser.parse_args()
     
-    # Load credentials and service mappings from config file if not provided via command line
+    # Load credentials, application aliases, skip list, and service mappings from config file if not provided via command line
+    application_aliases = {}
+    skip_applications = []
     service_mappings = {}
     if not args.cookies and not args.api_key and not args.app_key:
-        config_api_key, config_app_key, service_mappings = load_datadog_config()
+        config_api_key, config_app_key, application_aliases, skip_applications, service_mappings = load_datadog_config()
         if config_api_key and config_app_key:
             args.api_key = config_api_key
             args.app_key = config_app_key
         else:
             parser.error('Authentication required: provide --cookies OR (--api-key and --app-key) OR create ~/.datadog.cfg with credentials')
     else:
-        # Still load service mappings even if auth is provided via CLI
-        _, _, service_mappings = load_datadog_config()
+        # Still load application aliases, skip list, and service mappings even if auth is provided via CLI
+        _, _, application_aliases, skip_applications, service_mappings = load_datadog_config()
     
     # Validate authentication combinations
     if args.api_key and not args.app_key:
@@ -1515,7 +1629,9 @@ def main():
         time_period=args.time_period,
         application_filters=app_filters,  # Pass the list of application filters
         full_attribution_data=full_attribution_data,  # Pass full data for domain lookups
-        service_mappings=service_mappings  # Pass service mappings from config
+        service_mappings=service_mappings,  # Pass service mappings from config
+        application_aliases=application_aliases,  # Pass application aliases from config
+        skip_applications=skip_applications  # Pass skip list from config
     )
     
     # Run analysis

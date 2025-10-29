@@ -26,6 +26,7 @@ Examples:
 import argparse
 import json
 import requests
+from collections import Counter
 from colorama import Fore, Style, init
 from typing import Dict, List, Set
 
@@ -237,18 +238,18 @@ def get_domain_info(backstage_url: str, domain_ref: str, timeout: int = 30) -> D
         response.raise_for_status()
         
         domain_entity = response.json()
+        
+        # LOG FULL DOMAIN RESPONSE FOR DEBUGGING (commented out for normal use)
+        # print(f"{Fore.YELLOW}[DEBUG] === FULL DOMAIN RESPONSE FOR {domain_name} ==={Style.RESET_ALL}")
+        # print(f"{Fore.YELLOW}{json.dumps(domain_entity, indent=2)}{Style.RESET_ALL}")
+        # print(f"{Fore.YELLOW}[DEBUG] === END DOMAIN RESPONSE ==={Style.RESET_ALL}\n")
+        
         metadata = domain_entity.get('metadata', {})
         spec = domain_entity.get('spec', {})
         annotations = metadata.get('annotations', {})
         
         # Get domain title
         domain_title = metadata.get('title', metadata.get('name', ''))
-        
-        # TODO: Platform currently just copies the domain value since Backstage doesn't have a separate
-        # Platform entity type. Need to investigate if there's a different way to determine platform,
-        # such as using the parent domain with type='cloud', or if platform should be removed entirely.
-        # For now, commenting out platform extraction as it's redundant with domain.
-        # platform = metadata.get('title', metadata.get('name', ''))
         
         # Get business unit from parent domain (if this is a subdomain)
         business_unit = None
@@ -278,17 +279,16 @@ def get_domain_info(backstage_url: str, domain_ref: str, timeout: int = 30) -> D
                             spec.get('businessUnit') or
                             spec.get('business_unit'))
         
-        # TODO: Commented out platform fallback - see TODO above
-        # if not platform:
-        #     platform = (annotations.get('backstage.io/platform') or 
-        #                annotations.get('platform') or
-        #                spec.get('platform'))
+        # Get product from annotations or spec
+        product = (annotations.get('backstage.io/product') or
+                  annotations.get('product') or
+                  spec.get('product'))
         
         return {
             'domain_name': metadata.get('name', ''),
             'domain_title': domain_title,
             'business_unit': business_unit,
-            # 'platform': platform  # TODO: Commented out - redundant with domain, needs investigation
+            'product': product,
         }
         
     except requests.exceptions.RequestException:
@@ -311,27 +311,47 @@ def extract_team_info(team: Dict, debug: bool = False, backstage_url: str = None
     metadata = team.get('metadata', {})
     spec = team.get('spec', {})
     annotations = metadata.get('annotations', {})
+    labels = metadata.get('labels', {})
+    
+    team_name = metadata.get('name', 'unknown')
+    
+    # LOG FULL TEAM ENTITY FOR DEBUGGING (commented out for normal use)
+    # print(f"{Fore.YELLOW}[DEBUG] === FULL TEAM ENTITY FOR {team_name} ==={Style.RESET_ALL}")
+    # print(f"{Fore.YELLOW}{json.dumps(team, indent=2)}{Style.RESET_ALL}")
+    # print(f"{Fore.YELLOW}[DEBUG] === END TEAM ENTITY ==={Style.RESET_ALL}\n")
     
     # Debug: print all available annotations and spec fields
     if debug:
         team_name = metadata.get('name', 'unknown')
         print(f"{Fore.YELLOW}Debug: Team {team_name} annotations: {annotations}{Style.RESET_ALL}")
         print(f"{Fore.YELLOW}Debug: Team {team_name} spec: {spec}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Debug: Team {team_name} labels: {labels}{Style.RESET_ALL}")
     
     # Extract parent domain reference
     parent = spec.get('parent', None)
     domain_name = None
     business_unit = None
-    # TODO: Platform commented out - see get_domain_info for details
-    # platform = None
+    product = None
+    platform = None
     
-    # If parent is a domain reference, fetch domain information
+    # First, try to get values from team labels (highest priority)
+    business_unit = (labels.get('business-unit') or
+                    labels.get('businessUnit'))
+    
+    product = labels.get('product')
+    
+    platform = labels.get('platform')
+    
+    # If parent is a domain reference, fetch domain information for fallback
     if parent and parent.startswith('domain:') and backstage_url:
         domain_info = get_domain_info(backstage_url, parent, timeout)
         if domain_info:
             domain_name = domain_info.get('domain_title') or domain_info.get('domain_name')
-            business_unit = domain_info.get('business_unit')
-            # platform = domain_info.get('platform')  # TODO: Commented out - redundant with domain
+            # Use domain info as fallback only if not in labels
+            if not business_unit:
+                business_unit = domain_info.get('business_unit')
+            if not product:
+                product = domain_info.get('product')
     
     # Fallback: parse domain from parent if domain info not available
     if not domain_name and parent:
@@ -340,16 +360,31 @@ def extract_team_info(team: Dict, debug: bool = False, backstage_url: str = None
             if domain_part and domain_part != 'default':
                 domain_name = domain_part.upper()  # Convert to uppercase (e.g., iam -> IAM)
     
-    # Try annotations as fallback for business unit
+    # Try annotations as final fallback
     if not business_unit:
         business_unit = (annotations.get('backstage.io/business-unit') or
                         annotations.get('business-unit') or
                         annotations.get('businessUnit'))
     
-    # TODO: Platform fallback commented out - redundant with domain, needs investigation
-    # if not platform:
-    #     platform = (annotations.get('backstage.io/platform') or 
-    #                annotations.get('platform'))
+    if not product:
+        product = (annotations.get('backstage.io/product') or
+                  annotations.get('product'))
+    
+    if not platform:
+        platform = (annotations.get('backstage.io/platform') or 
+                   annotations.get('platform'))
+    
+    # Capitalize product if it exists (e.g., "essentials" -> "Essentials")
+    if product:
+        product = product.capitalize()
+    
+    # Format business_unit: convert "event-cloud" to "Event Cloud"
+    if business_unit:
+        business_unit = business_unit.replace('-', ' ').title()
+    
+    # Format platform: convert "simple-solutions" to "Simple Solutions"
+    if platform:
+        platform = platform.replace('-', ' ').title()
     
     return {
         'team_name': metadata.get('name', ''),
@@ -357,7 +392,8 @@ def extract_team_info(team: Dict, debug: bool = False, backstage_url: str = None
         'description': metadata.get('description', ''),
         'domain': domain_name,
         'business_unit': business_unit,
-        # 'platform': platform,  # TODO: Commented out - redundant with domain, needs investigation
+        'product': product,
+        'platform': platform,
         'parent': parent,
         'type': spec.get('type', None)
     }
@@ -397,6 +433,7 @@ def build_service_attribution(backstage_url: str, timeout: int = 30, single_team
                 'description': '',
                 'domain': None,
                 'business_unit': None,
+                'product': None,
                 'platform': None,
                 'parent': None
             }
@@ -405,6 +442,16 @@ def build_service_attribution(backstage_url: str, timeout: int = 30, single_team
         
         if components:
             component_info = [extract_component_info(comp) for comp in components]
+            
+            # If team product is null, try to infer from applications
+            if team_info.get('product') is None and component_info:
+                products = [app.get('product') for app in component_info if app.get('product')]
+                if products:
+                    # Use the most common product, or first one if all unique
+                    from collections import Counter
+                    product_counts = Counter(products)
+                    team_info['product'] = product_counts.most_common(1)[0][0]
+            
             attribution[single_team] = {
                 **team_info,  # Include all team metadata
                 'application_count': len(component_info),
@@ -423,10 +470,11 @@ def build_service_attribution(backstage_url: str, timeout: int = 30, single_team
         print(f"{Fore.RED}No teams found in Backstage{Style.RESET_ALL}")
         return attribution
     
+    total_teams = len(teams)
     print(f"{Fore.CYAN}Querying applications for each team...{Style.RESET_ALL}")
     
     # For each team, get their owned components
-    for team in teams:
+    for team_index, team in enumerate(teams, start=1):
         team_info = extract_team_info(team, debug=False, backstage_url=backstage_url, timeout=timeout)
         team_name = team_info['team_name']
         team_title = team_info['team_title']
@@ -434,12 +482,22 @@ def build_service_attribution(backstage_url: str, timeout: int = 30, single_team
         if not team_name:
             continue
         
-        print(f"{Fore.CYAN}  Querying team: {team_title} ({team_name}){Style.RESET_ALL}")
+        print(f"{Fore.CYAN}  Querying team: {team_title} ({team_name}) ({team_index}/{total_teams}){Style.RESET_ALL}")
         
         components = get_team_components(backstage_url, team_name, timeout)
         
         if components:
             component_info = [extract_component_info(comp) for comp in components]
+            
+            # If team product is null, try to infer from applications
+            if team_info.get('product') is None and component_info:
+                products = [app.get('product') for app in component_info if app.get('product')]
+                if products:
+                    # Use the most common product, or first one if all unique
+                    from collections import Counter
+                    product_counts = Counter(products)
+                    team_info['product'] = product_counts.most_common(1)[0][0]
+            
             attribution[team_name] = {
                 **team_info,  # Include all team metadata (name, title, domain, business_unit, platform, etc.)
                 'application_count': len(component_info),

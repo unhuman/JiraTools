@@ -2,13 +2,15 @@
 
 ## Overview
 
-`serviceConsumerAnalysis.py` is a powerful tool for analyzing service-to-service communication patterns in your microservices architecture using Datadog trace data. It identifies which services are calling your team's applications and generates comprehensive reports aggregated by domain and system.
+`serviceConsumerAnalysis.py` is a powerful tool for analyzing service-to-service communication patterns in your microservices architecture using Datadog trace data. It identifies which services are calling your team's applications and generates comprehensive reports organized by domain with consumers grouped by product.
 
 The tool takes team application attribution data (from `teamApplicationAttribution.py`) and queries Datadog's APM traces to discover consumption patterns, helping you understand:
-- Which business domains/teams are consuming your services
+- Which products/business areas are consuming your services
 - Which of your internal systems receive the most traffic
 - Cross-domain dependencies and communication patterns
 - External service usage that may need mapping
+
+**Key Feature**: Reports are organized by **domain** (one file per domain), but within each report, consumers are intelligently grouped by their **product** (with automatic fallback to domain if no product is defined).
 
 ## Prerequisites
 
@@ -88,6 +90,28 @@ Cookies should be semicolon-separated (e.g., `"_dd_did=...; datadog-theme=light"
   --nocache
   ```
 
+- **`--ignoreCacheExpiry`**: Use cached data without checking expiration time
+  - Reads and uses cache even if older than 24 hours
+  - Useful for analyzing historical data or reproducing past analysis
+  - Does not query Datadog API, relies entirely on cached responses
+  - Helpful when rate limits are a concern or API is unavailable
+  ```bash
+  --ignoreCacheExpiry
+  ```
+
+- **`--output <FILE>`**: Custom name for the summary report (default: `multiple_teams_report.json`)
+  ```bash
+  --output custom_report.json
+  ```
+
+- **`--excludeSpecifiedTeamRequests`**: When used with `--teams`, excludes requests from services owned by those teams from all reporting and analysis
+  - Only valid when `--teams` is specified
+  - Useful for focusing analysis on external consumers or avoiding internal cross-team traffic
+  - Any request from a service owned by one of the specified teams is ignored/excluded during processing
+  ```bash
+  --teams "team1,team2" --excludeSpecifiedTeamRequests
+  ```
+
 ### Examples
 
 **1. Basic usage with config file authentication:**
@@ -120,6 +144,19 @@ python serviceConsumerAnalysis.py allTeamApplications.json production https://co
 ```bash
 python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com \
   --nocache
+```
+
+**6. Use expired cache data for historical analysis:**
+```bash
+python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com \
+  --ignoreCacheExpiry
+```
+
+**7. Analyze specific teams, excluding their own requests:**
+```bash
+python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com \
+  --teams "team1,team2" \
+  --excludeSpecifiedTeamRequests
 ```
 
 ## Configuration File: ~/.datadog.cfg
@@ -327,18 +364,18 @@ The tool uses intelligent fuzzy matching to resolve Datadog service names to att
 
 ## Output Reports
 
-The tool generates JSON reports with two main views of your service consumption patterns.
+The tool generates JSON reports with two main views of your service consumption patterns. Reports are organized by **domain** (one file per domain), with consumers intelligently grouped by their **product** (or domain if no product is defined).
 
 ### Report Types
 
 #### 1. Domain Reports (`domain_reports`)
-Shows **WHO is calling your services**, aggregated by the caller's domain.
+Shows **WHO is calling your services**, organized by the target domain with consumers grouped by their product.
 
 **Structure**:
 ```json
 {
   "Target Domain": {
-    "Calling Domain": {
+    "Consumer Product": {
       "count": 1000,
       "percentage": 30.5,
       "details": [
@@ -353,10 +390,12 @@ Shows **WHO is calling your services**, aggregated by the caller's domain.
 }
 ```
 
+**Key Feature**: Consumers are grouped by their **product** (e.g., "billing", "event-management") if available. If a consuming service doesn't have a product defined, it falls back to the **domain** (e.g., "Analytics", "Platform").
+
 **Use Cases**:
-- Understanding which business domains depend on your services
-- Identifying cross-domain dependencies
-- Planning API changes and deprecations
+- Understanding which products/business areas depend on your services
+- Identifying cross-product dependencies
+- Planning API changes and deprecations based on product impact
 - Capacity planning based on consumer patterns
 
 #### 2. System Reports (`system_reports`)
@@ -399,7 +438,7 @@ Shows **WHICH of your systems are being called**, aggregated by system within yo
 
 ### External/Unknown Handling
 
-Services that cannot be resolved to a known domain are categorized as "External/Unknown":
+Services that cannot be resolved to a known domain/product are categorized as "External/Unknown":
 
 ```json
 {
@@ -427,13 +466,41 @@ This allows you to see what's calling your services without skewing metrics with
 
 ## Features & Capabilities
 
+### Product-Based Grouping
+The tool intelligently groups consuming services by their **product** (with automatic fallback to **platform**, then **domain**).
+
+**Special Case for "shared" Products**: If a service has product="shared" AND business_unit is NOT "shared", it is treated as if no product is defined and falls through to use platform or domain instead. However, if BOTH product AND business_unit are "shared", then "shared" is used as the valid grouping value. This prevents generic "shared" grouping for most cases while preserving it for truly shared services.
+
+**Resolution Order**:
+1. Check `application-assignments` config for explicit product mapping
+2. Look up product in attribution data (from `product` field)
+3. If no product found (or product is "shared" with non-shared business_unit), try platform
+4. If no platform found, use domain
+5. If none found, categorize as "External/Unknown"
+
+**Example**:
+- Service "billing-service" with product="billing" → grouped under "billing"
+- Service "team-service" with product="shared", business_unit="Analytics" → grouped under platform/domain (skips "shared")
+- Service "universal-service" with product="shared", business_unit="shared" → grouped under "shared" (both are shared)
+- Service "platform-service" with no product but platform="core-platform" → grouped under "core-platform"
+- Service "analytics-worker" with no product/platform but domain="Analytics" → grouped under "Analytics"
+- Service "external-lib" with no data → grouped under "External/Unknown"
+
+This provides better business-level visibility into which product areas are consuming your services, with platform as an intermediate level of granularity before falling back to domain-level grouping.
+
 ### Request Caching
-- Caches Datadog API responses for 24 hours
+- Caches Datadog API responses for 24 hours by default
 - Significantly speeds up re-runs and debugging
 - Cache stored in `requestCache/` directory
 - Automatic cache expiration and cleanup
 - Use `--nocache` flag to force fresh API requests while still updating cache
+- Use `--ignoreCacheExpiry` flag to use expired cache data for historical analysis
 - Cache can be manually cleared by deleting the `requestCache/` directory
+
+**Cache Options**:
+- **Normal mode**: Uses cache if fresh (< 24 hours old), queries API if expired
+- **`--nocache`**: Bypasses cache entirely, always queries API, updates cache with new data
+- **`--ignoreCacheExpiry`**: Uses cache regardless of age, useful for analyzing historical data without re-querying API
 
 ### Rate Limiting
 - Respects Datadog API rate limits
@@ -446,6 +513,12 @@ This allows you to see what's calling your services without skewing metrics with
 - Failed requests saved to `errors.json`
 - Detailed error logging with timestamps
 - Continues processing after individual failures
+
+### Excluding Specified Team Requests
+- When `--excludeSpecifiedTeamRequests` is enabled (with `--teams`), any requests from services owned by those teams are ignored in all reporting
+- This allows you to focus on external consumers or analyze only inbound traffic to your team's services
+- Useful for understanding how external products/domains depend on your services without noise from internal team requests
+- Must be used in conjunction with the `--teams` filter
 
 ### Fuzzy Service Matching
 The tool uses multiple strategies to match Datadog service names to your attribution data:
@@ -498,7 +571,91 @@ python serviceConsumerAnalysis.py \
 
 # Step 4: Review reports
 cat multiple_teams_report.json | jq '.domain_reports'
+
+# View specific domain report
+cat Analytics_consumer_report.json | jq '.consumer_products'
 ```
+
+### Sample Output Structure
+
+**Individual Domain Report** (`Analytics_consumer_report.json`):
+```json
+{
+  "domain": "Analytics",
+  "consumer_products": {
+    "billing": {
+      "count": 15000,
+      "percentage": 45.5,
+      "details": [
+        {
+          "target_service": "analytics-api",
+          "calling_service": "billing-service",
+          "count": 10000
+        },
+        {
+          "target_service": "analytics-worker",
+          "calling_service": "billing-processor",
+          "count": 5000
+        }
+      ]
+    },
+    "Platform": {
+      "count": 8000,
+      "percentage": 24.2,
+      "details": [
+        {
+          "target_service": "analytics-api",
+          "calling_service": "platform-gateway",
+          "count": 8000
+        }
+      ]
+    },
+    "event-management": {
+      "count": 10000,
+      "percentage": 30.3,
+      "details": [
+        {
+          "target_service": "analytics-stream",
+          "calling_service": "event-processor",
+          "count": 10000
+        }
+      ]
+    }
+  },
+  "unique_consuming_products": 3,
+  "consumer_by_system": {
+    "analytics-platform": {
+      "count": 20000,
+      "percentage": 60.6,
+      "services": [
+        {
+          "service": "analytics-api",
+          "count": 18000
+        },
+        {
+          "service": "analytics-worker",
+          "count": 2000
+        }
+      ]
+    },
+    "analytics-streaming": {
+      "count": 13000,
+      "percentage": 39.4,
+      "services": [
+        {
+          "service": "analytics-stream",
+          "count": 13000
+        }
+      ]
+    }
+  }
+}
+```
+
+Note: In this example:
+- "billing" is a **product** (grouped from services with `product="billing"`)
+- "Platform" could be a **platform** (fallback for services without product but with platform defined) or a **domain** (fallback when neither product nor platform is defined)
+- "event-management" is a **product**
 
 ### Filtering for Specific Analysis
 
@@ -518,7 +675,26 @@ python serviceConsumerAnalysis.py \
   https://company.datadoghq.com \
   -a "service-a" \
   --time-period 1d
+
+# Use expired cache for historical comparison
+python serviceConsumerAnalysis.py \
+  allTeamApplications.json \
+  production \
+  https://company.datadoghq.com \
+  --ignoreCacheExpiry \
+  --output historical_analysis.json
+
+# Analyze teams excluding their own internal requests
+python serviceConsumerAnalysis.py \
+  allTeamApplications.json \
+  production \
+  https://company.datadoghq.com \
+  --teams "team1,team2" \
+  --excludeSpecifiedTeamRequests \
+  --time-period 1w
 ```
+
+**Note**: When `--excludeSpecifiedTeamRequests` is used, requests originating from services owned by the specified teams will be excluded from all totals, percentages, and details in the reports.
 
 ## Troubleshooting
 
@@ -558,6 +734,22 @@ python serviceConsumerAnalysis.py \
 #### 5. Percentage Doesn't Add to 100%
 **Problem**: Percentages seem incorrect
 **Solution**: This is expected - "External/Unknown" is excluded from totals to prevent skewing metrics with unidentified callers
+
+#### 6. Understanding Product vs Platform vs Domain Grouping
+**Question**: Why do I see product names, platform names, and domain names in `consumer_products`?
+**Explanation**: 
+- Services with a defined `product` field (except "shared" in certain cases) are grouped by their product name (e.g., "billing", "event-management")
+- Services with product="shared" are handled specially:
+  - If business_unit is also "shared", the service is grouped under "shared"
+  - If business_unit is NOT "shared", it falls through to platform or domain
+- Services without a product but with a `platform` are grouped by their platform name (e.g., "core-platform", "data-platform")
+- Services with neither product nor platform are grouped by their `domain` (e.g., "Analytics", "Platform")
+- This provides the best available business-level view of consumption patterns with intermediate granularity
+- To see only product-based grouping, ensure all services have a meaningful `product` defined in attribution data or `application-assignments`
+
+#### 7. Excluded Team Requests Not Appearing
+**Problem**: Requests from specified teams are missing in reports
+**Solution**: This is expected when `--excludeSpecifiedTeamRequests` is used. These requests are intentionally excluded from analysis to focus on external consumers or avoid internal cross-team traffic.
 
 ### Debug Tips
 

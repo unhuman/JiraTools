@@ -4,7 +4,11 @@ Service Consumer Analysis Tool
 
 This script analyzes service consumers using Datadog trace data. It takes the output
 from teamApplicationAttribution.py and queries Datadog to find which services are
-calling each team's applications, then generates reports aggregated by domain and system.
+calling each team's applications, then generates reports aggregated by product (with
+domain fallback) and system.
+
+Services are grouped by their product if available, otherwise by their domain.
+This provides more granular analysis of service consumption patterns.
 
 Usage:
     python serviceConsumerAnalysis.py <input_file> <environment> <datadog_host> [auth_options] [filters]
@@ -76,13 +80,14 @@ Config File (~/.datadog.cfg):
 Output Reports:
     The script generates two types of reports in JSON format:
     
-    1. Domain Reports (domain_reports):
-       Shows WHICH DOMAINS are calling your services, aggregated by the caller's domain.
+    1. Product/Domain Reports (domain_reports):
+       Shows WHICH PRODUCTS/PLATFORMS/DOMAINS are calling your services. Services are grouped by their
+       product if available, otherwise platform, otherwise domain. Aggregates by the caller's product/platform/domain.
        
        Structure:
        {
-         "Target Domain": {
-           "Calling Domain": {
+         "Target Product/Platform/Domain": {
+           "Calling Product/Platform/Domain": {
              "count": <number of requests>,
              "percentage": <percentage of total requests>,
              "details": [
@@ -96,20 +101,22 @@ Output Reports:
          }
        }
        
-       Example: If the IAM domain receives 1000 total requests, and 300 come from the 
-       "Event Platform" domain, the report shows:
-       - Event Platform: count=300, percentage=30.0%
-       - Details list shows which specific Event Platform services called which IAM services
+       Example: If the "iam" product receives 1000 total requests, and 300 come from the 
+       "event-management" product, the report shows:
+       - event-management: count=300, percentage=30.0%
+       - Details list shows which specific event-management services called which iam services
        
-       Use this to answer: "Which business domains/teams are consuming our services?"
+       If a service doesn't have a product defined, it falls back to showing the platform, then domain.
+       
+       Use this to answer: "Which products/business areas are consuming our services?"
     
     2. System Reports (system_reports):
-       Shows WHICH OF YOUR SYSTEMS are receiving calls, aggregated by system within your domain.
+       Shows WHICH OF YOUR SYSTEMS are receiving calls, aggregated by system within your product/domain.
        Includes a breakdown of which specific services within each system are receiving calls.
        
        Structure:
        {
-         "Target Domain": {
+         "Target Product/Domain": {
            "System Name": {
              "count": <number of requests>,
              "percentage": <percentage of total requests>,
@@ -123,11 +130,11 @@ Output Reports:
          }
        }
        
-       Example: If the IAM domain has systems "iam", "universal-login", and "classic-event",
+       Example: If the "iam" product has systems "authentication", "authorization", and "user-profile",
        the report shows how many requests each system received:
-       - iam: count=620170, percentage=88.41%, services=[{service: "iam-service", count: 500000}, ...]
-       - universal-login: count=5693, percentage=0.81%, services=[{service: "login-api", count: 5693}]
-       - classic-event: count=75134, percentage=10.71%, services=[{service: "event-service", count: 75134}]
+       - authentication: count=620170, percentage=88.41%, services=[{service: "auth-service", count: 500000}, ...]
+       - authorization: count=5693, percentage=0.81%, services=[{service: "authz-api", count: 5693}]
+       - user-profile: count=75134, percentage=10.71%, services=[{service: "profile-service", count: 75134}]
        
        The services list within each system is sorted by count (descending).
        
@@ -135,7 +142,7 @@ Output Reports:
        and "Which specific services within each system are receiving the most traffic?"
     
     Key Differences:
-    - domain_reports: External view - shows WHO is calling you (by their domain)
+    - domain_reports: External view - shows WHO is calling you (by their product/domain)
     - system_reports: Internal view - shows WHICH of your systems are being called
     
     Both reports are sorted by count (descending) for easy consumption.
@@ -170,7 +177,7 @@ class DatadogClient:
     
     def __init__(self, host: str, api_key: Optional[str] = None, app_key: Optional[str] = None, 
                  cookies: Optional[str] = None, timeout: int = 30, rate_limit_delay: float = 1.0, 
-                 preserve_rate_limit: int = 1, use_cache: bool = True):
+                 preserve_rate_limit: int = 1, use_cache: bool = True, ignore_cache_expiry: bool = False):
         """
         Initialize Datadog client with either API keys or cookie authentication.
         
@@ -183,6 +190,7 @@ class DatadogClient:
             rate_limit_delay: Delay between requests in seconds
             preserve_rate_limit: Number of requests to preserve from rate limit (default: 1)
             use_cache: Whether to use cached responses (default: True)
+            ignore_cache_expiry: Whether to ignore cache expiration time (default: False)
         """
         self.host = host.rstrip('/')
         self.api_key = api_key
@@ -196,6 +204,7 @@ class DatadogClient:
         self.rate_limit_validated = False
         self.failed_500_errors = []  # Track services that failed with 500 after all retries
         self.use_cache = use_cache
+        self.ignore_cache_expiry = ignore_cache_expiry
         
         # Create cache directory if it doesn't exist
         if not os.path.exists(CACHE_DIR):
@@ -353,9 +362,9 @@ class DatadogClient:
             print(f"{Fore.YELLOW}[Cache] Invalid cache filename format: {cache_file}{Style.RESET_ALL}")
             return None
         
-        # Check if cache is expired
+        # Check if cache is expired (unless ignore_cache_expiry is set)
         age_seconds = time.time() - cache_time
-        if age_seconds > CACHE_MAX_AGE_SECONDS:
+        if not self.ignore_cache_expiry and age_seconds > CACHE_MAX_AGE_SECONDS:
             print(f"{Fore.YELLOW}[Cache] Cache expired (age: {age_seconds/3600:.1f}h), deleting: {cache_file}{Style.RESET_ALL}")
             os.remove(cache_file)
             return None
@@ -364,7 +373,10 @@ class DatadogClient:
         try:
             with open(cache_file, 'r') as f:
                 cached_data = json.load(f)
-            print(f"{Fore.GREEN}[Cache] Using cached response (age: {age_seconds/3600:.1f}h){Style.RESET_ALL}")
+            if self.ignore_cache_expiry and age_seconds > CACHE_MAX_AGE_SECONDS:
+                print(f"{Fore.CYAN}[Cache] Using expired cached response (age: {age_seconds/3600:.1f}h, expiry ignored){Style.RESET_ALL}")
+            else:
+                print(f"{Fore.GREEN}[Cache] Using cached response (age: {age_seconds/3600:.1f}h){Style.RESET_ALL}")
             return cached_data
         except Exception as e:
             print(f"{Fore.YELLOW}[Cache] Error reading cache file: {e}{Style.RESET_ALL}")
@@ -923,7 +935,7 @@ class DatadogClient:
 class ServiceConsumerAnalyzer:
     """Analyzes service consumers and generates reports."""
     
-    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None, service_mappings: Dict = None, application_aliases: Dict = None, skip_applications: List = None):
+    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None, service_mappings: Dict = None, application_aliases: Dict = None, skip_applications: List = None, exclude_team_requests: bool = False):
         """
         Initialize analyzer.
         
@@ -937,6 +949,7 @@ class ServiceConsumerAnalyzer:
             service_mappings: Service mappings from config file for external service domain resolution
             application_aliases: Application alias mappings from config file (key=service, value=alias_to_use_for_data)
             skip_applications: List of application names to completely exclude from processing
+            exclude_team_requests: If True, exclude requests from services owned by the specified teams when --team is used. Any request from a service owned by one of these teams is ignored/excluded during processing.
         """
         self.attribution_data = attribution_data
         self.datadog_client = datadog_client
@@ -946,11 +959,21 @@ class ServiceConsumerAnalyzer:
         self.service_mappings = service_mappings or {}  # Store service mappings from config
         self.application_aliases = application_aliases or {}  # Store application aliases from config
         self.skip_applications = set(skip_applications or [])  # Store as set for O(1) lookup
+        self.exclude_team_requests = exclude_team_requests
         
         # Build reverse lookup maps from full data (or filtered if full not provided)
         self.service_to_team = {}  # service_name -> team_info
         self.service_to_system = {}  # service_name -> system
         self._build_lookup_maps(full_attribution_data or attribution_data)
+        
+        # Build set of services owned by filtered teams for exclusion
+        self.excluded_team_services = set()
+        if self.exclude_team_requests:
+            for team_name, team_data in attribution_data.items():
+                for app in team_data.get('applications', []):
+                    service_name = app.get('name')
+                    if service_name:
+                        self.excluded_team_services.add(service_name.lower())
     
     def _build_lookup_maps(self, data_source: Dict):
         """Build reverse lookup maps from service name to team and system.
@@ -959,33 +982,40 @@ class ServiceConsumerAnalyzer:
         to support case-insensitive fuzzy matching.
         """
         for team_name, team_data in data_source.items():
-            team_info = {
-                'team_name': team_data.get('team_name'),
-                'team_title': team_data.get('team_title'),
-                'domain': team_data.get('domain'),
-                'business_unit': team_data.get('business_unit')
-            }
+            domain = team_data.get('domain')
             
             for app in team_data.get('applications', []):
                 service_name = app.get('name')
                 title = app.get('title')
                 system = app.get('system')
+                product = app.get('product')
+                platform = app.get('platform')
+                
+                # Create service info with product, platform, and domain
+                service_info = {
+                    'team_name': team_data.get('team_name'),
+                    'team_title': team_data.get('team_title'),
+                    'domain': domain,
+                    'business_unit': team_data.get('business_unit'),
+                    'product': product,
+                    'platform': platform
+                }
                 
                 if service_name:
                     # Store original case
-                    self.service_to_team[service_name] = team_info
+                    self.service_to_team[service_name] = service_info
                     self.service_to_system[service_name] = system
                     # Store lowercase for case-insensitive matching
-                    self.service_to_team[service_name.lower()] = team_info
+                    self.service_to_team[service_name.lower()] = service_info
                     self.service_to_system[service_name.lower()] = system
                 
                 # Also add title as an alternative lookup key (if different from name)
                 if title and title != service_name:
                     # Store original case
-                    self.service_to_team[title] = team_info
+                    self.service_to_team[title] = service_info
                     self.service_to_system[title] = system
                     # Store lowercase for case-insensitive matching
-                    self.service_to_team[title.lower()] = team_info
+                    self.service_to_team[title.lower()] = service_info
                     self.service_to_system[title.lower()] = system
     
     def _lookup_service_with_fallback(self, service_name: str) -> tuple:
@@ -1054,6 +1084,98 @@ class ServiceConsumerAnalyzer:
         
         return None, None
     
+    def _get_product_or_domain_for_service(self, service_name: str) -> str:
+        """
+        Get product for a service, with fallback to platform, then domain if neither is available.
+        
+        Special case: If product is "shared" AND business_unit is NOT "shared", it is treated 
+        as if no product exists and the method falls through to check platform, then domain.
+        However, if both product AND business_unit are "shared", then "shared" is used as the grouping.
+        
+        Resolution order:
+        1. Check application-assignments from config first (explicit configuration takes priority)
+           - Check if service has an alias, try the alias first
+           - Then try the original service name
+           - Return product if available (and not "shared" unless business_unit is also "shared"), otherwise platform, otherwise domain
+        2. Check attribution data with fuzzy matching (exact, -service, dashes->spaces, etc.)
+           - Handles application-alias mapping internally
+           - Return product if available (and not "shared" unless business_unit is also "shared"), otherwise platform, otherwise domain
+        3. Default to 'External/Unknown'
+        
+        Args:
+            service_name: Name of the service
+            
+        Returns:
+            Product name if available (applying shared logic), otherwise platform name, otherwise domain name, or 'External/Unknown'
+        """
+        # FIRST: Check application-assignments from config (explicit config takes priority)
+        # Check if service has an alias, and try the alias first
+        lookup_name = self.application_aliases.get(service_name, service_name)
+        if lookup_name in self.service_mappings:
+            mapping = self.service_mappings[lookup_name]
+            product = mapping.get('product')
+            platform = mapping.get('platform')
+            domain = mapping.get('domain')
+            business_unit = mapping.get('business-unit')
+            # Check if product is valid, considering the "shared" special case
+            if product and str(product).lower() not in ['', 'unknown', 'null', 'none']:
+                # If product is "shared", only skip it if business_unit is NOT also "shared"
+                if str(product).lower() == 'shared' and str(business_unit).lower() != 'shared':
+                    # Fall through to platform/domain
+                    pass
+                else:
+                    return product
+            # Fall through to platform if product wasn't valid or was skipped
+            if platform and str(platform).lower() not in ['', 'unknown', 'null', 'none']:
+                return platform
+            elif domain and domain.lower() not in ['', 'unknown', 'null']:
+                return domain
+        
+        # If alias didn't work, try the original service name
+        if lookup_name != service_name and service_name in self.service_mappings:
+            mapping = self.service_mappings[service_name]
+            product = mapping.get('product')
+            platform = mapping.get('platform')
+            domain = mapping.get('domain')
+            business_unit = mapping.get('business-unit')
+            # Check if product is valid, considering the "shared" special case
+            if product and str(product).lower() not in ['', 'unknown', 'null', 'none']:
+                # If product is "shared", only skip it if business_unit is NOT also "shared"
+                if str(product).lower() == 'shared' and str(business_unit).lower() != 'shared':
+                    # Fall through to platform/domain
+                    pass
+                else:
+                    return product
+            # Fall through to platform if product wasn't valid or was skipped
+            if platform and str(platform).lower() not in ['', 'unknown', 'null', 'none']:
+                return platform
+            elif domain and domain.lower() not in ['', 'unknown', 'null']:
+                return domain
+        
+        # SECOND: Try the attribution data with fuzzy matching (handles aliases internally)
+        service_info, _ = self._lookup_service_with_fallback(service_name)
+        if service_info:
+            product = service_info.get('product')
+            platform = service_info.get('platform')
+            domain = service_info.get('domain')
+            business_unit = service_info.get('business_unit')
+            # Check if product is valid, considering the "shared" special case
+            if product and str(product).lower() not in ['', 'unknown', 'null', 'none']:
+                # If product is "shared", only skip it if business_unit is NOT also "shared"
+                if str(product).lower() == 'shared' and str(business_unit).lower() != 'shared':
+                    # Fall through to platform/domain
+                    pass
+                else:
+                    return product
+            # Fall through to platform if product wasn't valid or was skipped
+            if platform and str(platform).lower() not in ['', 'unknown', 'null', 'none']:
+                return platform
+            elif domain and domain.lower() not in ['', 'unknown', 'null']:
+                return domain
+        
+        # LAST: Default to External/Unknown
+        return 'External/Unknown'
+    
     def _get_domain_for_service(self, service_name: str) -> str:
         """
         Get domain for a service, using config fallback and fuzzy matching if needed.
@@ -1103,12 +1225,12 @@ class ServiceConsumerAnalyzer:
         Analyze consumers for all teams' services.
         
         Returns:
-            Dictionary with aggregated results by domain and system
+            Dictionary with aggregated results by domain, with consumers grouped by product (or domain if no product)
         """
-        # Aggregation structures
-        domain_consumers = defaultdict(lambda: defaultdict(int))  # domain -> {consuming_domain -> count}
+        # Aggregation structures - reports organized by DOMAIN, consumers grouped by product
+        domain_consumers = defaultdict(lambda: defaultdict(int))  # domain -> {consuming_product_or_domain -> count}
         system_consumers = defaultdict(lambda: defaultdict(int))  # domain -> {system -> count}
-        domain_details = defaultdict(lambda: defaultdict(list))  # domain -> {consuming_domain -> [details]}
+        domain_details = defaultdict(lambda: defaultdict(list))  # domain -> {consuming_product_or_domain -> [details]}
         system_details = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # domain -> {system -> {service -> count}}
         
         total_services = sum(len(team_data.get('applications', [])) 
@@ -1119,6 +1241,8 @@ class ServiceConsumerAnalyzer:
         print(f"\n{Fore.CYAN}Starting consumer analysis for {total_services} services...{Style.RESET_ALL}\n")
         if self.skip_applications:
             print(f"{Fore.YELLOW}Skipping {len(self.skip_applications)} application(s): {', '.join(sorted(self.skip_applications))}{Style.RESET_ALL}\n")
+        if self.exclude_team_requests:
+            print(f"{Fore.YELLOW}Excluding requests from {len(self.excluded_team_services)} service(s) owned by the specified team(s) (requests from these services will be ignored in analysis){Style.RESET_ALL}\n")
         
         for team_name, team_data in self.attribution_data.items():
             team_domain = team_data.get('domain', 'Unknown')
@@ -1131,6 +1255,7 @@ class ServiceConsumerAnalyzer:
                 # Use the service name from the application data
                 service_name = app.get('name')
                 system = app.get('system', 'Unknown')
+                
                 processed += 1
                 
                 # Skip if this service is in the skip list
@@ -1139,7 +1264,7 @@ class ServiceConsumerAnalyzer:
                     print(f"  [{processed}/{total_services}] Skipping: {service_name} (in skip-applications list)")
                     continue
                 
-                print(f"  [{processed}/{total_services}] Querying consumers for: {service_name}")
+                print(f"  [{processed}/{total_services}] Querying consumers for: {service_name} (Domain: {team_domain})")
                 
                 # Query Datadog for consumers of this service
                 consumers = self.datadog_client.query_service_consumers(
@@ -1161,23 +1286,27 @@ class ServiceConsumerAnalyzer:
                     if consumer_service in self.skip_applications:
                         continue
                     
-                    # Get domain for this consumer service (with fallback to config)
-                    consumer_domain = self._get_domain_for_service(consumer_service)
+                    # Skip if the calling service is owned by an excluded team
+                    if self.exclude_team_requests and consumer_service.lower() in self.excluded_team_services:
+                        continue
+                    
+                    # Get product (with domain fallback) for this consumer service
+                    consumer_group = self._get_product_or_domain_for_service(consumer_service)
                     
                     # For External/Unknown services, don't add to totals but preserve details
-                    if consumer_domain == 'External/Unknown':
+                    if consumer_group == 'External/Unknown':
                         # Add 0 to aggregates (don't affect totals)
-                        domain_consumers[team_domain][consumer_domain] += 0
+                        domain_consumers[team_domain][consumer_group] += 0
                         # Still track details but with actual count for reference
-                        domain_details[team_domain][consumer_domain].append({
+                        domain_details[team_domain][consumer_group].append({
                             'target_service': service_name,
                             'calling_service': consumer_service,
                             'count': call_count  # Preserve actual count in details
                         })
                     else:
                         # Normal aggregation for known services
-                        # Aggregate by domain
-                        domain_consumers[team_domain][consumer_domain] += call_count
+                        # Aggregate by consumer's product (or domain if no product)
+                        domain_consumers[team_domain][consumer_group] += call_count
                         
                         # Aggregate by system
                         system_consumers[team_domain][system] += call_count
@@ -1186,7 +1315,7 @@ class ServiceConsumerAnalyzer:
                         system_details[team_domain][system][service_name] += call_count
                         
                         # Track details
-                        domain_details[team_domain][consumer_domain].append({
+                        domain_details[team_domain][consumer_group].append({
                             'target_service': service_name,
                             'calling_service': consumer_service,
                             'count': call_count
@@ -1206,7 +1335,10 @@ class ServiceConsumerAnalyzer:
     
     def generate_reports(self, analysis_results: Dict, output_dir: str = '.', team_names: str = None, application_names: str = None):
         """
-        Generate domain reports from analysis results.
+        Generate reports from analysis results.
+        
+        Reports are organized by domain (one file per domain).
+        Within each report, consumers are grouped by product (with domain as fallback).
         
         Args:
             analysis_results: Results from analyze_all_teams()
@@ -1219,20 +1351,21 @@ class ServiceConsumerAnalyzer:
         domain_details = analysis_results.get('domain_details', {})
         system_details = analysis_results.get('system_details', {})
         
-        print(f"\n{Fore.CYAN}Generating domain reports...{Style.RESET_ALL}\n")
+        print(f"\n{Fore.CYAN}Generating domain reports (with product-grouped consumers)...{Style.RESET_ALL}\n")
         
-        # Format domain reports with count, percentage, and details
+        # Format reports with count, percentage, and details
+        # Consumers are grouped by their product (or domain if no product)
         formatted_domain_reports = {}
-        for target_domain, consumer_domains in domain_consumers.items():
-            total_calls = sum(consumer_domains.values())
+        for target_domain, consumer_products in domain_consumers.items():
+            total_calls = sum(consumer_products.values())
             formatted_consumers = {}
             
-            for consumer_domain, count in consumer_domains.items():
+            for consumer_product, count in consumer_products.items():
                 percentage = (count / total_calls * 100) if total_calls > 0 else 0
-                formatted_consumers[consumer_domain] = {
+                formatted_consumers[consumer_product] = {
                     'count': count,
                     'percentage': round(percentage, 2),
-                    'details': domain_details.get(target_domain, {}).get(consumer_domain, [])
+                    'details': domain_details.get(target_domain, {}).get(consumer_product, [])
                 }
             
             formatted_domain_reports[target_domain] = formatted_consumers
@@ -1304,9 +1437,9 @@ class ServiceConsumerAnalyzer:
                 'domain': domain,
                 'environment': self.environment,
                 'total_calls_received': total_calls,
-                'unique_consuming_domains': len(domain_consumers.get(domain, {})),
+                'unique_consuming_products': len(domain_consumers.get(domain, {})),
                 'unique_systems': len(system_consumers.get(domain, {})),
-                'consumer_domains': sorted_domain_reports.get(domain, {}),
+                'consumer_products': sorted_domain_reports.get(domain, {}),
                 'consumer_by_system': sorted_system_reports.get(domain, {})
             }
             
@@ -1315,7 +1448,7 @@ class ServiceConsumerAnalyzer:
             
             print(f"{Fore.GREEN}Generated report: {report_filename}{Style.RESET_ALL}")
             print(f"  Total calls received: {report['total_calls_received']}")
-            print(f"  Consuming domains: {report['unique_consuming_domains']}")
+            print(f"  Consuming products: {report['unique_consuming_products']}")
             print(f"  Systems involved: {report['unique_systems']}")
         
         # Generate summary report with custom filename
@@ -1352,6 +1485,9 @@ class ServiceConsumerAnalyzer:
             summary['filtered_by'] = {'applications': application_names}
         elif team_names:
             summary['filtered_by'] = {'teams': team_names}
+            if self.exclude_team_requests:
+                summary['filtered_by']['excluded_team_requests'] = True
+                summary['filtered_by']['excluded_services_count'] = len(self.excluded_team_services)
         
         with open(summary_filename, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -1465,6 +1601,7 @@ def main():
     # Optional arguments
     parser.add_argument('-t', '--teams', help='Optional: Process only these teams, comma-separated (e.g., "Oktagon,Identity")')
     parser.add_argument('-a', '--applications', help='Optional: Process only these applications, comma-separated (e.g., "iam-service,auth-service")')
+    parser.add_argument('--excludeSpecifiedTeamRequests', action='store_true', help='Exclude requests from services owned by the specified team(s). Only valid with --teams parameter.')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds (default: 30)')
     parser.add_argument('--rate-limit', type=float, default=1.0, help='Delay between API requests in seconds (default: 1.0)')
     parser.add_argument('--preserve-rate-limit', type=int, default=1, help='Number of requests to preserve from rate limit (default: 1, use 0 to consume full limit)')
@@ -1472,8 +1609,14 @@ def main():
     parser.add_argument('--time-period', default='1h', help='Time period to query (e.g., 1h, 4h, 1d, 1w) (default: 1h)')
     parser.add_argument('--output-dir', default='.', help='Output directory for reports (default: current directory)')
     parser.add_argument('--nocache', action='store_true', help='Disable using cached responses (still updates cache)')
+    parser.add_argument('--ignoreCacheExpiry', action='store_true', help='Use cached data without checking expiration time')
     
     args = parser.parse_args()
+    
+    # Validate --excludeSpecifiedTeamRequests usage
+    if args.excludeSpecifiedTeamRequests and not args.teams:
+        print(f"{Fore.RED}Error: --excludeSpecifiedTeamRequests can only be used with --teams parameter{Style.RESET_ALL}")
+        sys.exit(1)
     
     # Load credentials, application aliases, skip list, and service mappings from config file if not provided via command line
     application_aliases = {}
@@ -1622,6 +1765,8 @@ def main():
     use_cache = not args.nocache
     if args.nocache:
         print(f"{Fore.YELLOW}Cache: Disabled (will still update cache){Style.RESET_ALL}")
+    elif args.ignoreCacheExpiry:
+        print(f"{Fore.CYAN}Cache: Enabled (ignoring expiration time){Style.RESET_ALL}")
     else:
         print(f"{Fore.CYAN}Cache: Enabled (max age: {CACHE_MAX_AGE_SECONDS/3600:.1f}h){Style.RESET_ALL}")
     
@@ -1633,7 +1778,8 @@ def main():
         timeout=args.timeout,
         rate_limit_delay=args.rate_limit,
         preserve_rate_limit=args.preserve_rate_limit,
-        use_cache=use_cache
+        use_cache=use_cache,
+        ignore_cache_expiry=args.ignoreCacheExpiry
     )
     
     # Initialize analyzer
@@ -1646,7 +1792,8 @@ def main():
         full_attribution_data=full_attribution_data,  # Pass full data for domain lookups
         service_mappings=service_mappings,  # Pass service mappings from config
         application_aliases=application_aliases,  # Pass application aliases from config
-        skip_applications=skip_applications  # Pass skip list from config
+        skip_applications=skip_applications,  # Pass skip list from config
+        exclude_team_requests=args.excludeSpecifiedTeamRequests  # Exclude requests from specified team services
     )
     
     # Run analysis

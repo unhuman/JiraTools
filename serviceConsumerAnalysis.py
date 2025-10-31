@@ -156,6 +156,7 @@ import time
 import hashlib
 import os
 import glob
+import re
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from colorama import init, Fore, Style
@@ -935,7 +936,7 @@ class DatadogClient:
 class ServiceConsumerAnalyzer:
     """Analyzes service consumers and generates reports."""
     
-    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None, service_mappings: Dict = None, application_aliases: Dict = None, skip_applications: List = None, exclude_team_requests: bool = False):
+    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None, service_mappings: Dict = None, application_aliases: Dict = None, skip_applications: List = None, exclude_team_requests: bool = False, desired_end_categorizations: list = None, remap_categorizations: Dict = None):
         """
         Initialize analyzer.
         
@@ -950,6 +951,8 @@ class ServiceConsumerAnalyzer:
             application_aliases: Application alias mappings from config file (key=service, value=alias_to_use_for_data)
             skip_applications: List of application names to completely exclude from processing
             exclude_team_requests: If True, exclude requests from services owned by the specified teams when --team is used. Any request from a service owned by one of these teams is ignored/excluded during processing.
+            desired_end_categorizations: List of regex patterns to match business concepts for prioritized grouping (from .datadog.cfg), compiled with re.IGNORECASE for case-insensitive matching
+            remap_categorizations: Dictionary mapping categorization values to their final consolidated values (case-insensitive)
         """
         self.attribution_data = attribution_data
         self.datadog_client = datadog_client
@@ -960,6 +963,12 @@ class ServiceConsumerAnalyzer:
         self.application_aliases = application_aliases or {}  # Store application aliases from config
         self.skip_applications = set(skip_applications or [])  # Store as set for O(1) lookup
         self.exclude_team_requests = exclude_team_requests
+        # Compile regex patterns for desired categorizations (case-insensitive)
+        self.desired_end_categorizations_patterns = [
+            re.compile(pattern, re.IGNORECASE) for pattern in (desired_end_categorizations or [])
+        ]
+        # Store remap categorizations (convert keys to lowercase for case-insensitive matching)
+        self.remap_categorizations = {k.lower(): v for k, v in (remap_categorizations or {}).items()}
         
         # Build reverse lookup maps from full data (or filtered if full not provided)
         self.service_to_team = {}  # service_name -> team_info
@@ -1084,74 +1093,122 @@ class ServiceConsumerAnalyzer:
         
         return None, None
     
+    def _apply_remap_categorization(self, category: str) -> str:
+        """
+        Apply remap categorizations to consolidate similar categories.
+        All categories are normalized to lowercase for consistent grouping.
+        
+        Args:
+            category: The categorization value to potentially remap
+            
+        Returns:
+            The remapped category (normalized to lowercase) if a mapping exists, 
+            otherwise the original category normalized to lowercase
+        """
+        if not self.remap_categorizations:
+            return category.lower()
+        
+        # Check for case-insensitive match
+        category_lower = category.lower()
+        if category_lower in self.remap_categorizations:
+            # Return the remapped value, normalized to lowercase
+            return self.remap_categorizations[category_lower].lower()
+        
+        # Return original category normalized to lowercase
+        return category_lower
+    
     def _get_product_or_domain_for_service(self, service_name: str) -> str:
         """
         Get product for a service, with fallback to platform, then domain if neither is available.
         
-        Special case: If product is "shared" AND business_unit is NOT "shared", it is treated 
-        as if no product exists and the method falls through to check platform, then domain.
-        However, if both product AND business_unit are "shared", then "shared" is used as the grouping.
+        "Shared" Logic:
+        ---------------
+        Special handling for "shared" values to avoid over-aggregation:
+        
+        1. If BOTH product="shared" AND platform="shared" AND business_unit is valid:
+           → Use business_unit for grouping
+           
+        2. If product="shared" AND business_unit!="shared":
+           → Skip product, fall through to platform
+           
+        3. If product="shared" AND business_unit="shared":
+           → Use "shared" for grouping
+           
+        4. If platform="shared" AND business_unit!="shared":
+           → Skip platform, fall through to domain
+           
+        5. If platform="shared" AND business_unit="shared":
+           → Use "shared" for grouping
+        
+        Examples:
+        ---------
+        - product="shared", platform="shared", business_unit="unit-a" → "unit-a"
+        - product="shared", platform="platform-x", business_unit="unit-b" → "platform-x"
+        - product="product-y", platform="shared", business_unit="unit-c" → "product-y"
+        - product="shared", platform="shared", business_unit="shared" → "shared"
         
         Resolution order:
-        1. Check application-assignments from config first (explicit configuration takes priority)
+        -----------------
+        1. Check desired-end-categorizations regex patterns first (case-insensitive)
+           - If any value in hierarchy [product, platform, domain] matches a pattern, use it
+           
+        2. Check application-assignments from config (explicit configuration takes priority)
            - Check if service has an alias, try the alias first
            - Then try the original service name
-           - Return product if available (and not "shared" unless business_unit is also "shared"), otherwise platform, otherwise domain
-        2. Check attribution data with fuzzy matching (exact, -service, dashes->spaces, etc.)
+           - Apply "shared" logic as described above
+           
+        3. Check attribution data with fuzzy matching (exact, -service, dashes->spaces, etc.)
            - Handles application-alias mapping internally
-           - Return product if available (and not "shared" unless business_unit is also "shared"), otherwise platform, otherwise domain
-        3. Default to 'External/Unknown'
+           - Apply "shared" logic as described above
+           
+        4. Default to 'External/Unknown'
+        
+        All returned values are:
+        - Passed through remap-categorizations (if configured)
+        - Normalized to lowercase for case-insensitive grouping
         
         Args:
             service_name: Name of the service
             
         Returns:
-            Product name if available (applying shared logic), otherwise platform name, otherwise domain name, or 'External/Unknown'
+            Categorization value (product, platform, domain, or business_unit) after applying
+            shared logic, remapping, and lowercase normalization, or 'External/Unknown'
         """
         # FIRST: Check application-assignments from config (explicit config takes priority)
-        # Check if service has an alias, and try the alias first
         lookup_name = self.application_aliases.get(service_name, service_name)
-        if lookup_name in self.service_mappings:
-            mapping = self.service_mappings[lookup_name]
-            product = mapping.get('product')
-            platform = mapping.get('platform')
-            domain = mapping.get('domain')
-            business_unit = mapping.get('business-unit')
-            # Check if product is valid, considering the "shared" special case
-            if product and str(product).lower() not in ['', 'unknown', 'null', 'none']:
-                # If product is "shared", only skip it if business_unit is NOT also "shared"
-                if str(product).lower() == 'shared' and str(business_unit).lower() != 'shared':
-                    # Fall through to platform/domain
-                    pass
-                else:
-                    return product
-            # Fall through to platform if product wasn't valid or was skipped
-            if platform and str(platform).lower() not in ['', 'unknown', 'null', 'none']:
-                return platform
-            elif domain and domain.lower() not in ['', 'unknown', 'null']:
-                return domain
-        
-        # If alias didn't work, try the original service name
-        if lookup_name != service_name and service_name in self.service_mappings:
-            mapping = self.service_mappings[service_name]
-            product = mapping.get('product')
-            platform = mapping.get('platform')
-            domain = mapping.get('domain')
-            business_unit = mapping.get('business-unit')
-            # Check if product is valid, considering the "shared" special case
-            if product and str(product).lower() not in ['', 'unknown', 'null', 'none']:
-                # If product is "shared", only skip it if business_unit is NOT also "shared"
-                if str(product).lower() == 'shared' and str(business_unit).lower() != 'shared':
-                    # Fall through to platform/domain
-                    pass
-                else:
-                    return product
-            # Fall through to platform if product wasn't valid or was skipped
-            if platform and str(platform).lower() not in ['', 'unknown', 'null', 'none']:
-                return platform
-            elif domain and domain.lower() not in ['', 'unknown', 'null']:
-                return domain
-        
+        for name in [lookup_name, service_name]:
+            if name in self.service_mappings:
+                mapping = self.service_mappings[name]
+                product = mapping.get('product')
+                platform = mapping.get('platform')
+                domain = mapping.get('domain')
+                business_unit = mapping.get('business-unit')
+                hierarchy = [product, platform, domain]
+                # Check desired categorizations first (case-insensitive regex)
+                for value in hierarchy:
+                    if value:
+                        for pattern in self.desired_end_categorizations_patterns:
+                            if pattern.search(str(value)):
+                                return self._apply_remap_categorization(value)
+                # Special case: if both product and platform are "shared", use business-unit
+                if (product and str(product).lower() == 'shared' and 
+                    platform and str(platform).lower() == 'shared' and
+                    business_unit and str(business_unit).lower() not in ['', 'unknown', 'null', 'none']):
+                    return self._apply_remap_categorization(business_unit)
+                # Shared logic for product
+                if product and str(product).lower() not in ['', 'unknown', 'null', 'none']:
+                    if str(product).lower() == 'shared' and str(business_unit).lower() != 'shared':
+                        pass  # Skip product, fall through to platform/domain
+                    else:
+                        return self._apply_remap_categorization(product)
+                # Platform check - also skip if platform is "shared" and business_unit is not "shared"
+                if platform and str(platform).lower() not in ['', 'unknown', 'null', 'none']:
+                    if str(platform).lower() == 'shared' and str(business_unit).lower() != 'shared':
+                        pass  # Skip platform, fall through to domain
+                    else:
+                        return self._apply_remap_categorization(platform)
+                if domain and domain.lower() not in ['', 'unknown', 'null']:
+                    return self._apply_remap_categorization(domain)
         # SECOND: Try the attribution data with fuzzy matching (handles aliases internally)
         service_info, _ = self._lookup_service_with_fallback(service_name)
         if service_info:
@@ -1159,20 +1216,32 @@ class ServiceConsumerAnalyzer:
             platform = service_info.get('platform')
             domain = service_info.get('domain')
             business_unit = service_info.get('business_unit')
-            # Check if product is valid, considering the "shared" special case
+            hierarchy = [product, platform, domain]
+            # Check desired categorizations first (case-insensitive regex)
+            for value in hierarchy:
+                if value:
+                    for pattern in self.desired_end_categorizations_patterns:
+                        if pattern.search(str(value)):
+                            return self._apply_remap_categorization(value)
+            # Special case: if both product and platform are "shared", use business-unit
+            if (product and str(product).lower() == 'shared' and 
+                platform and str(platform).lower() == 'shared' and
+                business_unit and str(business_unit).lower() not in ['', 'unknown', 'null', 'none']):
+                return self._apply_remap_categorization(business_unit)
+            # Shared logic for product
             if product and str(product).lower() not in ['', 'unknown', 'null', 'none']:
-                # If product is "shared", only skip it if business_unit is NOT also "shared"
                 if str(product).lower() == 'shared' and str(business_unit).lower() != 'shared':
-                    # Fall through to platform/domain
-                    pass
+                    pass  # Skip product, fall through to platform/domain
                 else:
-                    return product
-            # Fall through to platform if product wasn't valid or was skipped
+                    return self._apply_remap_categorization(product)
+            # Platform check - also skip if platform is "shared" and business_unit is not "shared"
             if platform and str(platform).lower() not in ['', 'unknown', 'null', 'none']:
-                return platform
-            elif domain and domain.lower() not in ['', 'unknown', 'null']:
-                return domain
-        
+                if str(platform).lower() == 'shared' and str(business_unit).lower() != 'shared':
+                    pass  # Skip platform, fall through to domain
+                else:
+                    return self._apply_remap_categorization(platform)
+            if domain and domain.lower() not in ['', 'unknown', 'null']:
+                return self._apply_remap_categorization(domain)
         # LAST: Default to External/Unknown
         return 'External/Unknown'
     
@@ -1497,10 +1566,10 @@ class ServiceConsumerAnalyzer:
 
 def load_datadog_config():
     """
-    Load Datadog credentials, optional application aliases, skip list, and service mappings from ~/.datadog.cfg
+    Load Datadog credentials, optional application aliases, skip list, service mappings, desired-end-categorizations, and remap-categorizations from ~/.datadog.cfg
     
     Returns:
-        Tuple of (api_key, app_key, application_aliases, skip_applications, service_mappings) or (None, None, {}, [], {}) if file doesn't exist or is invalid
+        Tuple of (api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations) or (None, None, {}, [], {}, [], {}) if file doesn't exist or is invalid
         
     Expected config format:
     {
@@ -1514,6 +1583,16 @@ def load_datadog_config():
         "test-service",
         "deprecated-service"
       ],
+      "desired-end-categorizations": [
+        "flex-event",
+        "virtual.*hub",
+        "^framework$"
+      ],
+      "remap-categorizations": {
+        "virtual-attendee-hub": "attendee-hub",
+        "framework": "CDF",
+        "flex-event": "Registration"
+      },
       "application-assignments": [
         {
           "name": "unknown-service-1",
@@ -1530,7 +1609,7 @@ def load_datadog_config():
     config_path = os.path.expanduser('~/.datadog.cfg')
     
     if not os.path.exists(config_path):
-        return None, None, {}, [], {}
+        return None, None, {}, [], {}, [], {}
     
     try:
         with open(config_path, 'r') as f:
@@ -1544,6 +1623,12 @@ def load_datadog_config():
         
         # Load skip-applications list
         skip_applications = config.get('skip-applications', [])
+        
+        # Load desired-end-categorizations list as regex patterns (will be compiled with re.IGNORECASE)
+        desired_end_categorizations = config.get('desired-end-categorizations', [])
+        
+        # Load remap-categorizations dictionary for consolidating categories
+        remap_categorizations = config.get('remap-categorizations', {})
         
         # Convert application-assignments array to a dictionary keyed by service name
         service_mappings_list = config.get('application-assignments', [])
@@ -1567,17 +1652,21 @@ def load_datadog_config():
                 print(f"{Fore.CYAN}Loaded {len(skip_applications)} skip application(s) from ~/.datadog.cfg{Style.RESET_ALL}")
             if service_mappings:
                 print(f"{Fore.CYAN}Loaded {len(service_mappings)} service mapping(s) from ~/.datadog.cfg{Style.RESET_ALL}")
-            return api_key, app_key, application_aliases, skip_applications, service_mappings
+            if desired_end_categorizations:
+                print(f"{Fore.CYAN}Loaded {len(desired_end_categorizations)} desired end categorization(s) from ~/.datadog.cfg{Style.RESET_ALL}")
+            if remap_categorizations:
+                print(f"{Fore.CYAN}Loaded {len(remap_categorizations)} remap categorization(s) from ~/.datadog.cfg{Style.RESET_ALL}")
+            return api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations
         else:
             print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg exists but missing 'api-key' or 'app-key' fields{Style.RESET_ALL}")
-            return None, None, application_aliases, skip_applications, service_mappings
+            return None, None, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations
             
     except json.JSONDecodeError as e:
         print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg is not valid JSON: {e}{Style.RESET_ALL}")
-        return None, None, {}, [], {}
+        return None, None, {}, [], {}, [], {}
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Could not read ~/.datadog.cfg: {e}{Style.RESET_ALL}")
-        return None, None, {}, [], {}
+        return None, None, {}, [], {}, []
 
 
 def main():
@@ -1618,20 +1707,22 @@ def main():
         print(f"{Fore.RED}Error: --excludeSpecifiedTeamRequests can only be used with --teams parameter{Style.RESET_ALL}")
         sys.exit(1)
     
-    # Load credentials, application aliases, skip list, and service mappings from config file if not provided via command line
+    # Load credentials, application aliases, skip list, service mappings, and desired-end-categorizations from config file if not provided via command line
     application_aliases = {}
     skip_applications = []
     service_mappings = {}
+    desired_end_categorizations = []
+    remap_categorizations = {}
     if not args.cookies and not args.api_key and not args.app_key:
-        config_api_key, config_app_key, application_aliases, skip_applications, service_mappings = load_datadog_config()
+        config_api_key, config_app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations = load_datadog_config()
         if config_api_key and config_app_key:
             args.api_key = config_api_key
             args.app_key = config_app_key
         else:
             parser.error('Authentication required: provide --cookies OR (--api-key and --app-key) OR create ~/.datadog.cfg with credentials')
     else:
-        # Still load application aliases, skip list, and service mappings even if auth is provided via CLI
-        _, _, application_aliases, skip_applications, service_mappings = load_datadog_config()
+        # Still load application aliases, skip list, service mappings, desired-end-categorizations, and remap-categorizations even if auth is provided via CLI
+        _, _, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations = load_datadog_config()
     
     # Validate authentication combinations
     if args.api_key and not args.app_key:
@@ -1793,7 +1884,9 @@ def main():
         service_mappings=service_mappings,  # Pass service mappings from config
         application_aliases=application_aliases,  # Pass application aliases from config
         skip_applications=skip_applications,  # Pass skip list from config
-        exclude_team_requests=args.excludeSpecifiedTeamRequests  # Exclude requests from specified team services
+        exclude_team_requests=args.excludeSpecifiedTeamRequests,  # Exclude requests from specified team services
+        desired_end_categorizations=desired_end_categorizations,  # Pass desired categorizations from config
+        remap_categorizations=remap_categorizations  # Pass remap categorizations from config
     )
     
     # Run analysis

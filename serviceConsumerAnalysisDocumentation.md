@@ -469,14 +469,36 @@ This allows you to see what's calling your services without skewing metrics with
 ### Product-Based Grouping
 The tool intelligently groups consuming services by their **product** (with automatic fallback to **platform**, then **domain**).
 
-**Special Case for "shared" Products**: If a service has product="shared" AND business_unit is NOT "shared", it is treated as if no product is defined and falls through to use platform or domain instead. However, if BOTH product AND business_unit are "shared", then "shared" is used as the valid grouping value. This prevents generic "shared" grouping for most cases while preserving it for truly shared services.
+#### Special Handling for "shared" Values
+
+To avoid over-aggregation, "shared" values are handled specially:
+
+1. **Both product="shared" AND platform="shared"**:
+   - If business_unit is valid (not "shared") → Use business_unit
+   - If business_unit is also "shared" → Use "shared"
+
+2. **Only product="shared"**:
+   - If business_unit is NOT "shared" → Skip product, fall through to platform
+   - If business_unit is "shared" → Use "shared"
+
+3. **Only platform="shared"**:
+   - If business_unit is NOT "shared" → Skip platform, fall through to domain
+   - If business_unit is "shared" → Use "shared"
+
+**Examples**:
+- `product="shared"`, `platform="shared"`, `business_unit="unit-a"` → Groups as "unit-a"
+- `product="shared"`, `platform="platform-x"`, `business_unit="unit-b"` → Groups as "platform-x"
+- `product="product-y"`, `platform="shared"`, `business_unit="unit-c"` → Groups as "product-y"
+- `product="shared"`, `platform="shared"`, `business_unit="shared"` → Groups as "shared"
 
 **Resolution Order**:
-1. Check `application-assignments` config for explicit product mapping
-2. Look up product in attribution data (from `product` field)
-3. If no product found (or product is "shared" with non-shared business_unit), try platform
-4. If no platform found, use domain
-5. If none found, categorize as "External/Unknown"
+1. Check `desired-end-categorizations` regex patterns (case-insensitive)
+2. Check `application-assignments` config for explicit product mapping
+3. Look up product in attribution data (from `product` field)
+4. Apply "shared" logic (skip if "shared" with non-shared business_unit)
+5. If no valid product, try platform (apply "shared" logic)
+6. If no valid platform, use domain
+7. If none found, categorize as "External/Unknown"
 
 **Example**:
 - Service "billing-service" with product="billing" → grouped under "billing"

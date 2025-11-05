@@ -1566,10 +1566,10 @@ class ServiceConsumerAnalyzer:
 
 def load_datadog_config():
     """
-    Load Datadog credentials, optional application aliases, skip list, service mappings, desired-end-categorizations, and remap-categorizations from ~/.datadog.cfg
+    Load Datadog credentials, optional application aliases, skip list, service mappings, desired-end-categorizations, remap-categorizations, teams, and excludeSpecifiedTeamRequests from ~/.datadog.cfg
     
     Returns:
-        Tuple of (api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations) or (None, None, {}, [], {}, [], {}) if file doesn't exist or is invalid
+        Tuple of (api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, teams, exclude_team_requests) or (None, None, {}, [], {}, [], {}, [], False) if file doesn't exist or is invalid
         
     Expected config format:
     {
@@ -1593,6 +1593,12 @@ def load_datadog_config():
         "framework": "CDF",
         "flex-event": "Registration"
       },
+      "teams": [
+        "team1",
+        "team2",
+        "team3"
+      ],
+      "excludeSpecifiedTeamRequests": false,
       "application-assignments": [
         {
           "name": "unknown-service-1",
@@ -1609,7 +1615,7 @@ def load_datadog_config():
     config_path = os.path.expanduser('~/.datadog.cfg')
     
     if not os.path.exists(config_path):
-        return None, None, {}, [], {}, [], {}
+        return None, None, {}, [], {}, [], {}, [], False
     
     try:
         with open(config_path, 'r') as f:
@@ -1629,6 +1635,12 @@ def load_datadog_config():
         
         # Load remap-categorizations dictionary for consolidating categories
         remap_categorizations = config.get('remap-categorizations', {})
+        
+        # Load teams list
+        teams = config.get('teams', [])
+        
+        # Load excludeSpecifiedTeamRequests boolean
+        exclude_team_requests = config.get('excludeSpecifiedTeamRequests', False)
         
         # Convert application-assignments array to a dictionary keyed by service name
         service_mappings_list = config.get('application-assignments', [])
@@ -1656,17 +1668,21 @@ def load_datadog_config():
                 print(f"{Fore.CYAN}Loaded {len(desired_end_categorizations)} desired end categorization(s) from ~/.datadog.cfg{Style.RESET_ALL}")
             if remap_categorizations:
                 print(f"{Fore.CYAN}Loaded {len(remap_categorizations)} remap categorization(s) from ~/.datadog.cfg{Style.RESET_ALL}")
-            return api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations
+            if teams:
+                print(f"{Fore.CYAN}Loaded {len(teams)} team(s) from ~/.datadog.cfg{Style.RESET_ALL}")
+            if exclude_team_requests:
+                print(f"{Fore.CYAN}Loaded excludeSpecifiedTeamRequests=true from ~/.datadog.cfg{Style.RESET_ALL}")
+            return api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, teams, exclude_team_requests
         else:
             print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg exists but missing 'api-key' or 'app-key' fields{Style.RESET_ALL}")
-            return None, None, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations
+            return None, None, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, teams, exclude_team_requests
             
     except json.JSONDecodeError as e:
         print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg is not valid JSON: {e}{Style.RESET_ALL}")
-        return None, None, {}, [], {}, [], {}
+        return None, None, {}, [], {}, [], {}, [], False
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Could not read ~/.datadog.cfg: {e}{Style.RESET_ALL}")
-        return None, None, {}, [], {}, []
+        return None, None, {}, [], {}, [], {}, [], False
 
 
 def main():
@@ -1690,7 +1706,7 @@ def main():
     # Optional arguments
     parser.add_argument('-t', '--teams', help='Optional: Process only these teams, comma-separated (e.g., "Oktagon,Identity")')
     parser.add_argument('-a', '--applications', help='Optional: Process only these applications, comma-separated (e.g., "iam-service,auth-service")')
-    parser.add_argument('--excludeSpecifiedTeamRequests', action='store_true', help='Exclude requests from services owned by the specified team(s). Only valid with --teams parameter.')
+    parser.add_argument('--excludeSpecifiedTeamRequests', action='store_true', help='Exclude requests from services owned by the specified team(s). Only valid when teams are specified (via --teams parameter or config file).')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds (default: 30)')
     parser.add_argument('--rate-limit', type=float, default=1.0, help='Delay between API requests in seconds (default: 1.0)')
     parser.add_argument('--preserve-rate-limit', type=int, default=1, help='Number of requests to preserve from rate limit (default: 1, use 0 to consume full limit)')
@@ -1702,27 +1718,24 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate --excludeSpecifiedTeamRequests usage
-    if args.excludeSpecifiedTeamRequests and not args.teams:
-        print(f"{Fore.RED}Error: --excludeSpecifiedTeamRequests can only be used with --teams parameter{Style.RESET_ALL}")
-        sys.exit(1)
-    
-    # Load credentials, application aliases, skip list, service mappings, and desired-end-categorizations from config file if not provided via command line
+    # Load credentials, application aliases, skip list, service mappings, desired-end-categorizations, teams, and excludeSpecifiedTeamRequests from config file if not provided via command line
     application_aliases = {}
     skip_applications = []
     service_mappings = {}
     desired_end_categorizations = []
     remap_categorizations = {}
+    config_teams = []
+    config_exclude_team_requests = False
     if not args.cookies and not args.api_key and not args.app_key:
-        config_api_key, config_app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations = load_datadog_config()
+        config_api_key, config_app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests = load_datadog_config()
         if config_api_key and config_app_key:
             args.api_key = config_api_key
             args.app_key = config_app_key
         else:
             parser.error('Authentication required: provide --cookies OR (--api-key and --app-key) OR create ~/.datadog.cfg with credentials')
     else:
-        # Still load application aliases, skip list, service mappings, desired-end-categorizations, and remap-categorizations even if auth is provided via CLI
-        _, _, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations = load_datadog_config()
+        # Still load application aliases, skip list, service mappings, desired-end-categorizations, remap-categorizations, teams, and excludeSpecifiedTeamRequests even if auth is provided via CLI
+        _, _, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests = load_datadog_config()
     
     # Validate authentication combinations
     if args.api_key and not args.app_key:
@@ -1755,11 +1768,27 @@ def main():
     # Keep a copy of full data for domain lookups
     full_attribution_data = attribution_data.copy()
     
-    # Filter to specified teams if provided
+    # Filter to specified teams if provided (from command line or config file)
     team_filters = []
     if args.teams:
         # Parse comma-separated list and normalize (strip whitespace, lowercase)
         team_filters = [t.strip().lower() for t in args.teams.split(',') if t.strip()]
+    elif config_teams:
+        # Use teams from config file if no command line teams provided
+        team_filters = [t.strip().lower() for t in config_teams if t.strip()]
+        print(f"{Fore.CYAN}Using teams from ~/.datadog.cfg: {', '.join(config_teams)}{Style.RESET_ALL}")
+    
+    # Use config file excludeSpecifiedTeamRequests if not provided on command line
+    exclude_team_requests = args.excludeSpecifiedTeamRequests or config_exclude_team_requests
+    
+    # Validate --excludeSpecifiedTeamRequests usage
+    if exclude_team_requests and not team_filters:
+        print(f"{Fore.RED}Error: excludeSpecifiedTeamRequests can only be used when teams are specified (via --teams parameter or config file){Style.RESET_ALL}")
+        sys.exit(1)
+    
+    if team_filters:
+        # Store the original team names for display
+        args.teams = ','.join(config_teams if config_teams and not args.teams else args.teams.split(','))
         
         if team_filters:
             teams_found = []
@@ -1884,7 +1913,7 @@ def main():
         service_mappings=service_mappings,  # Pass service mappings from config
         application_aliases=application_aliases,  # Pass application aliases from config
         skip_applications=skip_applications,  # Pass skip list from config
-        exclude_team_requests=args.excludeSpecifiedTeamRequests,  # Exclude requests from specified team services
+        exclude_team_requests=exclude_team_requests,  # Exclude requests from specified team services (from CLI or config)
         desired_end_categorizations=desired_end_categorizations,  # Pass desired categorizations from config
         remap_categorizations=remap_categorizations  # Pass remap categorizations from config
     )

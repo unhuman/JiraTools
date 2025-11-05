@@ -104,12 +104,14 @@ Cookies should be semicolon-separated (e.g., `"_dd_did=...; datadog-theme=light"
   --output custom_report.json
   ```
 
-- **`--excludeSpecifiedTeamRequests`**: When used with `--teams`, excludes requests from services owned by those teams from all reporting and analysis
-  - Only valid when `--teams` is specified
+- **`--excludeSpecifiedTeamRequests`**: When teams are specified (via `--teams` or config file), excludes requests from services owned by those teams from all reporting and analysis
+  - Only valid when teams are specified (command line or config file)
   - Useful for focusing analysis on external consumers or avoiding internal cross-team traffic
   - Any request from a service owned by one of the specified teams is ignored/excluded during processing
   ```bash
   --teams "team1,team2" --excludeSpecifiedTeamRequests
+  # Or if teams are in config file:
+  --excludeSpecifiedTeamRequests
   ```
 
 ### Examples
@@ -159,6 +161,13 @@ python serviceConsumerAnalysis.py allTeamApplications.json production https://co
   --excludeSpecifiedTeamRequests
 ```
 
+**8. Use teams from config file and exclude their requests:**
+```bash
+# Assumes teams are defined in ~/.datadog.cfg
+python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com \
+  --excludeSpecifiedTeamRequests
+```
+
 ## Configuration File: ~/.datadog.cfg
 
 The `.datadog.cfg` file is a JSON configuration file stored in your home directory that provides credentials, service mappings, and advanced configuration options.
@@ -183,6 +192,12 @@ The `.datadog.cfg` file is a JSON configuration file stored in your home directo
     "deprecated-service",
     "internal-tool"
   ],
+  "teams": [
+    "team1",
+    "team2",
+    "team3"
+  ],
+  "excludeSpecifiedTeamRequests": false,
   "application-assignments": [
     {
       "name": "external-service-name",
@@ -260,7 +275,77 @@ The `.datadog.cfg` file is a JSON configuration file stored in your home directo
 - Deprecated services being phased out
 - Internal monitoring tools that skew metrics
 
-#### 4. Application Assignments (Optional)
+#### 4. Teams (Optional)
+```json
+{
+  "teams": [
+    "team1",
+    "team2",
+    "team3"
+  ]
+}
+```
+
+**Purpose**: Specify a default list of teams to analyze when the `--teams` parameter is not provided on the command line.
+
+**Behavior**:
+- If `--teams` is provided on command line, it takes precedence
+- If `--teams` is not provided, uses the teams list from config file
+- If neither is provided, all teams in the input file are analyzed
+- Team names are matched case-insensitively against team identifiers, team names, and team titles
+
+**Use Cases**:
+- Consistent team filtering across multiple runs
+- Avoiding long command lines when analyzing the same teams repeatedly
+- Standardizing analysis to specific teams without manual filtering
+
+**Example Configuration**:
+```json
+{
+  "teams": ["team1", "team2", "team3"]
+}
+```
+
+With this configuration, running the script without `--teams` will automatically filter to these three teams, equivalent to running:
+```bash
+python serviceConsumerAnalysis.py ... --teams "team1,team2,team3"
+```
+
+#### 5. Exclude Specified Team Requests (Optional)
+```json
+{
+  "excludeSpecifiedTeamRequests": true
+}
+```
+
+**Purpose**: Set the default behavior for excluding requests from services owned by the specified teams when not provided on the command line.
+
+**Behavior**:
+- If `--excludeSpecifiedTeamRequests` is provided on command line, it takes precedence (always enabled)
+- If `--excludeSpecifiedTeamRequests` is not provided, uses the value from config file (true/false)
+- If neither is provided, defaults to false (include team requests)
+- Only valid when teams are specified (via `--teams` parameter or "teams" in config file)
+- When enabled, excludes any requests from services owned by the specified teams from all reporting and analysis
+
+**Use Cases**:
+- Always exclude internal team traffic in analyses to focus on external consumers
+- Consistent behavior across multiple runs without needing to specify the flag each time
+- Standardizing team-focused analysis to only show external dependencies
+
+**Example Configuration**:
+```json
+{
+  "teams": ["team1", "team2"],
+  "excludeSpecifiedTeamRequests": true
+}
+```
+
+With this configuration, running the script will automatically exclude requests from team1 and team2 services, equivalent to running:
+```bash
+python serviceConsumerAnalysis.py ... --teams "team1,team2" --excludeSpecifiedTeamRequests
+```
+
+#### 6. Application Assignments (Optional)
 ```json
 {
   "application-assignments": [
@@ -537,10 +622,10 @@ This provides better business-level visibility into which product areas are cons
 - Continues processing after individual failures
 
 ### Excluding Specified Team Requests
-- When `--excludeSpecifiedTeamRequests` is enabled (with `--teams`), any requests from services owned by those teams are ignored in all reporting
+- When `--excludeSpecifiedTeamRequests` is enabled with teams specified (via `--teams` parameter or config file), any requests from services owned by those teams are ignored in all reporting
 - This allows you to focus on external consumers or analyze only inbound traffic to your team's services
 - Useful for understanding how external products/domains depend on your services without noise from internal team requests
-- Must be used in conjunction with the `--teams` filter
+- Must be used in conjunction with team filtering (either `--teams` parameter or "teams" in config file)
 
 ### Fuzzy Service Matching
 The tool uses multiple strategies to match Datadog service names to your attribution data:
@@ -706,7 +791,7 @@ python serviceConsumerAnalysis.py \
   --ignoreCacheExpiry \
   --output historical_analysis.json
 
-# Analyze teams excluding their own internal requests
+# Analyze teams excluding their own internal requests (command line teams)
 python serviceConsumerAnalysis.py \
   allTeamApplications.json \
   production \
@@ -714,9 +799,17 @@ python serviceConsumerAnalysis.py \
   --teams "team1,team2" \
   --excludeSpecifiedTeamRequests \
   --time-period 1w
+
+# Analyze teams from config file, excluding their internal requests
+python serviceConsumerAnalysis.py \
+  allTeamApplications.json \
+  production \
+  https://company.datadoghq.com \
+  --excludeSpecifiedTeamRequests \
+  --time-period 1w
 ```
 
-**Note**: When `--excludeSpecifiedTeamRequests` is used, requests originating from services owned by the specified teams will be excluded from all totals, percentages, and details in the reports.
+**Note**: When `--excludeSpecifiedTeamRequests` is used, requests originating from services owned by the specified teams (from `--teams` parameter or config file) will be excluded from all totals, percentages, and details in the reports.
 
 ## Troubleshooting
 

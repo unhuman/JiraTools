@@ -936,7 +936,7 @@ class DatadogClient:
 class ServiceConsumerAnalyzer:
     """Analyzes service consumers and generates reports."""
     
-    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None, service_mappings: Dict = None, application_aliases: Dict = None, skip_applications: List = None, exclude_team_requests: bool = False, desired_end_categorizations: list = None, remap_categorizations: Dict = None):
+    def __init__(self, attribution_data: Dict, datadog_client: DatadogClient, environment: str, time_period: str = "1h", application_filters: list = None, full_attribution_data: Dict = None, service_mappings: Dict = None, application_aliases: Dict = None, skip_applications: List = None, exclude_team_requests: bool = False, desired_end_categorizations: list = None, remap_categorizations: Dict = None, exclude_products: list = None, map_products: Dict = None):
         """
         Initialize analyzer.
         
@@ -953,6 +953,8 @@ class ServiceConsumerAnalyzer:
             exclude_team_requests: If True, exclude requests from services owned by the specified teams when --team is used. Any request from a service owned by one of these teams is ignored/excluded during processing.
             desired_end_categorizations: List of regex patterns to match business concepts for prioritized grouping (from .datadog.cfg), compiled with re.IGNORECASE for case-insensitive matching
             remap_categorizations: Dictionary mapping categorization values to their final consolidated values (case-insensitive)
+            exclude_products: List of product/platform/domain names to exclude from totals (case-insensitive matching)
+            map_products: Dictionary mapping source product names to target product names (case-insensitive matching)
         """
         self.attribution_data = attribution_data
         self.datadog_client = datadog_client
@@ -969,20 +971,55 @@ class ServiceConsumerAnalyzer:
         ]
         # Store remap categorizations (convert keys to lowercase for case-insensitive matching)
         self.remap_categorizations = {k.lower(): v for k, v in (remap_categorizations or {}).items()}
+        # Store exclude products (convert to lowercase for case-insensitive matching)
+        self.exclude_products = set(p.lower() for p in (exclude_products or []))
+        # Store map products (convert keys to lowercase for case-insensitive matching)
+        self.map_products = {k.lower(): v.lower() for k, v in (map_products or {}).items()}
         
         # Build reverse lookup maps from full data (or filtered if full not provided)
         self.service_to_team = {}  # service_name -> team_info
         self.service_to_system = {}  # service_name -> system
         self._build_lookup_maps(full_attribution_data or attribution_data)
         
-        # Build set of services owned by filtered teams for exclusion
-        self.excluded_team_services = set()
+        # Build set of teams that should have their services excluded
+        self.excluded_team_names = set()
         if self.exclude_team_requests:
             for team_name, team_data in attribution_data.items():
-                for app in team_data.get('applications', []):
-                    service_name = app.get('name')
-                    if service_name:
-                        self.excluded_team_services.add(service_name.lower())
+                self.excluded_team_names.add(team_name)
+    
+    def _is_service_from_excluded_team(self, service_name: str) -> bool:
+        """
+        Check if a service belongs to a team that should be excluded.
+        Checks application-assignments first, then uses fuzzy matching on attribution data.
+        
+        Args:
+            service_name: The service name to check
+            
+        Returns:
+            True if the service belongs to an excluded team, False otherwise
+        """
+        if not self.exclude_team_requests:
+            return False
+        
+        # FIRST: Check application-assignments from config (explicit config takes priority)
+        lookup_name = self.application_aliases.get(service_name, service_name)
+        for name in [lookup_name, service_name]:
+            if name in self.service_mappings:
+                mapping = self.service_mappings[name]
+                service_team = mapping.get('team')
+                if service_team:
+                    # Check if this service's team is in the excluded teams
+                    return service_team in self.excluded_team_names
+        
+        # SECOND: Try to find the service in attribution data with fuzzy matching
+        team_info, _ = self._lookup_service_with_fallback(service_name)
+        
+        if team_info:
+            # Check if this service's team is in the excluded teams
+            service_team_name = team_info.get('team_name')
+            return service_team_name in self.excluded_team_names
+        
+        return False
     
     def _build_lookup_maps(self, data_source: Dict):
         """Build reverse lookup maps from service name to team and system.
@@ -1311,7 +1348,8 @@ class ServiceConsumerAnalyzer:
         if self.skip_applications:
             print(f"{Fore.YELLOW}Skipping {len(self.skip_applications)} application(s): {', '.join(sorted(self.skip_applications))}{Style.RESET_ALL}\n")
         if self.exclude_team_requests:
-            print(f"{Fore.YELLOW}Excluding requests from {len(self.excluded_team_services)} service(s) owned by the specified team(s) (requests from these services will be ignored in analysis){Style.RESET_ALL}\n")
+            excluded_team_titles = [self.attribution_data[team].get('team_title', team) for team in self.excluded_team_names if team in self.attribution_data]
+            print(f"{Fore.YELLOW}Excluding requests from services owned by {len(self.excluded_team_names)} team(s): {', '.join(excluded_team_titles)} (requests from these teams' services will be ignored in analysis){Style.RESET_ALL}\n")
         
         for team_name, team_data in self.attribution_data.items():
             team_domain = team_data.get('domain', 'Unknown')
@@ -1355,22 +1393,28 @@ class ServiceConsumerAnalyzer:
                     if consumer_service in self.skip_applications:
                         continue
                     
-                    # Skip if the calling service is owned by an excluded team
-                    if self.exclude_team_requests and consumer_service.lower() in self.excluded_team_services:
-                        continue
-                    
                     # Get product (with domain fallback) for this consumer service
                     consumer_group = self._get_product_or_domain_for_service(consumer_service)
                     
-                    # For External/Unknown services, don't add to totals but preserve details
-                    if consumer_group == 'External/Unknown':
-                        # Add 0 to aggregates (don't affect totals)
+                    # Apply product mapping if configured (case-insensitive)
+                    consumer_group_lower = consumer_group.lower()
+                    if consumer_group_lower in self.map_products:
+                        consumer_group = self.map_products[consumer_group_lower]
+                    
+                    # Check if this service should be excluded (from excluded team, External/Unknown, or excluded product)
+                    is_excluded_team = self._is_service_from_excluded_team(consumer_service)
+                    is_external_unknown = consumer_group == 'External/Unknown'
+                    is_excluded_product = consumer_group.lower() in self.exclude_products
+                    is_excluded = is_excluded_team or is_external_unknown or is_excluded_product
+                    
+                    if is_excluded:
+                        # For excluded services, don't add to totals but preserve details with excluded_count
                         domain_consumers[team_domain][consumer_group] += 0
-                        # Still track details but with actual count for reference
+                        # Track details with excluded_count instead of count
                         domain_details[team_domain][consumer_group].append({
                             'target_service': service_name,
                             'calling_service': consumer_service,
-                            'count': call_count  # Preserve actual count in details
+                            'excluded_count': call_count  # Preserve actual count as excluded_count
                         })
                     else:
                         # Normal aggregation for known services
@@ -1431,11 +1475,42 @@ class ServiceConsumerAnalyzer:
             
             for consumer_product, count in consumer_products.items():
                 percentage = (count / total_calls * 100) if total_calls > 0 else 0
-                formatted_consumers[consumer_product] = {
-                    'count': count,
-                    'percentage': round(percentage, 2),
-                    'details': domain_details.get(target_domain, {}).get(consumer_product, [])
-                }
+                details = domain_details.get(target_domain, {}).get(consumer_product, [])
+                
+                # Calculate total excluded count from details (sum all excluded_count fields)
+                excluded_count = sum(d.get('excluded_count', 0) for d in details)
+                
+                # Also check if this product name should be excluded (case-insensitive)
+                is_excluded_product = consumer_product.lower() in self.exclude_products
+                
+                # If excluded by product name, treat the aggregated count as excluded
+                if is_excluded_product:
+                    excluded_count = count
+                    count = 0  # Zero out the count since it's excluded
+                
+                # Determine if this product has ANY non-excluded traffic
+                has_non_excluded_traffic = count > 0
+                
+                if has_non_excluded_traffic:
+                    # Product has non-excluded traffic - calculate percentage
+                    consumer_entry = {
+                        'count': count,
+                        'percentage': round(percentage, 2),
+                        'details': details
+                    }
+                    
+                    # Also include excluded_count if there is any excluded traffic
+                    if excluded_count > 0:
+                        consumer_entry['excluded_count'] = excluded_count
+                else:
+                    # Product has ONLY excluded traffic
+                    consumer_entry = {
+                        'percentage': 0.0,  # Don't count in percentages
+                        'excluded_count': excluded_count,  # Show actual count as excluded
+                        'details': details
+                    }
+                
+                formatted_consumers[consumer_product] = consumer_entry
             
             formatted_domain_reports[target_domain] = formatted_consumers
         
@@ -1476,12 +1551,12 @@ class ServiceConsumerAnalyzer:
                         reverse=True
                     )
         
-        # 2. Sort consumer_domains by count descending
+        # 2. Sort consumer_domains by percentage descending, then by excluded_count descending
         sorted_domain_reports = {}
         for domain_key, consumers in formatted_domain_reports.items():
             sorted_consumers = dict(sorted(
                 consumers.items(),
-                key=lambda kv: kv[1]['count'],
+                key=lambda kv: (kv[1].get('percentage', 0), kv[1].get('excluded_count', 0)),
                 reverse=True
             ))
             sorted_domain_reports[domain_key] = sorted_consumers
@@ -1556,7 +1631,7 @@ class ServiceConsumerAnalyzer:
             summary['filtered_by'] = {'teams': team_names}
             if self.exclude_team_requests:
                 summary['filtered_by']['excluded_team_requests'] = True
-                summary['filtered_by']['excluded_services_count'] = len(self.excluded_team_services)
+                summary['filtered_by']['excluded_teams_count'] = len(self.excluded_team_names)
         
         with open(summary_filename, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -1566,32 +1641,32 @@ class ServiceConsumerAnalyzer:
 
 def load_datadog_config():
     """
-    Load Datadog credentials, optional application aliases, skip list, service mappings, desired-end-categorizations, remap-categorizations, teams, and excludeSpecifiedTeamRequests from ~/.datadog.cfg
+    Load Datadog credentials, optional application aliases, skip list, service mappings, desired-end-categorizations, remap-categorizations, teams, excludeSpecifiedTeamRequests, exclude-products, and map-products from ~/.datadog.cfg
     
     Returns:
-        Tuple of (api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, teams, exclude_team_requests) or (None, None, {}, [], {}, [], {}, [], False) if file doesn't exist or is invalid
+        Tuple of (api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, teams, exclude_team_requests, exclude_products, map_products) or (None, None, {}, [], {}, [], {}, [], False, [], {}) if file doesn't exist or is invalid
         
     Expected config format:
     {
       "api-key": "your_datadog_api_key",
       "app-key": "your_datadog_app_key",
       "application-alias": {
-        "service1": "service2",
-        "another-service": "canonical-service"
+        "service-name-1": "canonical-service-name",
+        "service-name-2": "another-canonical-name"
       },
       "skip-applications": [
         "test-service",
         "deprecated-service"
       ],
       "desired-end-categorizations": [
-        "flex-event",
-        "virtual.*hub",
-        "^framework$"
+        "product-pattern-1",
+        "product-pattern-2.*",
+        "^exact-match$"
       ],
       "remap-categorizations": {
-        "virtual-attendee-hub": "attendee-hub",
-        "framework": "CDF",
-        "flex-event": "Registration"
+        "old-name-1": "new-name-1",
+        "old-name-2": "new-name-2",
+        "old-name-3": "new-name-3"
       },
       "teams": [
         "team1",
@@ -1599,12 +1674,21 @@ def load_datadog_config():
         "team3"
       ],
       "excludeSpecifiedTeamRequests": false,
+      "exclude-products": [
+        "External/Unknown",
+        "product-name-1",
+        "product-name-2"
+      ],
+      "map-products": {
+        "source-product-1": "target-product-1",
+        "source-product-2": "target-product-2"
+      },
       "application-assignments": [
         {
-          "name": "unknown-service-1",
-          "business-unit": "US1-business-unit",
-          "domain": "US1-domain",
-          "platform": "US1-platform",
+          "name": "external-service-1",
+          "business-unit": "business-unit-name",
+          "domain": "domain-name",
+          "platform": "platform-name",
           "product": null,
           "system": null
         }
@@ -1615,7 +1699,7 @@ def load_datadog_config():
     config_path = os.path.expanduser('~/.datadog.cfg')
     
     if not os.path.exists(config_path):
-        return None, None, {}, [], {}, [], {}, [], False
+        return None, None, {}, [], {}, [], {}, [], False, [], {}
     
     try:
         with open(config_path, 'r') as f:
@@ -1642,6 +1726,12 @@ def load_datadog_config():
         # Load excludeSpecifiedTeamRequests boolean
         exclude_team_requests = config.get('excludeSpecifiedTeamRequests', False)
         
+        # Load exclude-products list
+        exclude_products = config.get('exclude-products', [])
+        
+        # Load map-products dictionary (maps source product to target product)
+        map_products = config.get('map-products', {})
+        
         # Convert application-assignments array to a dictionary keyed by service name
         service_mappings_list = config.get('application-assignments', [])
         service_mappings = {}
@@ -1653,7 +1743,8 @@ def load_datadog_config():
                     'domain': mapping.get('domain'),
                     'platform': mapping.get('platform'),
                     'product': mapping.get('product'),
-                    'system': mapping.get('system')
+                    'system': mapping.get('system'),
+                    'team': mapping.get('team')  # Include team for exclusion checking
                 }
         
         if api_key and app_key:
@@ -1672,17 +1763,21 @@ def load_datadog_config():
                 print(f"{Fore.CYAN}Loaded {len(teams)} team(s) from ~/.datadog.cfg{Style.RESET_ALL}")
             if exclude_team_requests:
                 print(f"{Fore.CYAN}Loaded excludeSpecifiedTeamRequests=true from ~/.datadog.cfg{Style.RESET_ALL}")
-            return api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, teams, exclude_team_requests
+            if exclude_products:
+                print(f"{Fore.CYAN}Loaded {len(exclude_products)} exclude product(s) from ~/.datadog.cfg{Style.RESET_ALL}")
+            if map_products:
+                print(f"{Fore.CYAN}Loaded {len(map_products)} product mapping(s) from ~/.datadog.cfg{Style.RESET_ALL}")
+            return api_key, app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, teams, exclude_team_requests, exclude_products, map_products
         else:
             print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg exists but missing 'api-key' or 'app-key' fields{Style.RESET_ALL}")
-            return None, None, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, teams, exclude_team_requests
+            return None, None, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, teams, exclude_team_requests, exclude_products, map_products
             
     except json.JSONDecodeError as e:
         print(f"{Fore.YELLOW}Warning: ~/.datadog.cfg is not valid JSON: {e}{Style.RESET_ALL}")
-        return None, None, {}, [], {}, [], {}, [], False
+        return None, None, {}, [], {}, [], {}, [], False, [], {}
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Could not read ~/.datadog.cfg: {e}{Style.RESET_ALL}")
-        return None, None, {}, [], {}, [], {}, [], False
+        return None, None, {}, [], {}, [], {}, [], False, [], {}
 
 
 def main():
@@ -1707,6 +1802,7 @@ def main():
     parser.add_argument('-t', '--teams', help='Optional: Process only these teams, comma-separated (e.g., "Oktagon,Identity")')
     parser.add_argument('-a', '--applications', help='Optional: Process only these applications, comma-separated (e.g., "iam-service,auth-service")')
     parser.add_argument('--excludeSpecifiedTeamRequests', action='store_true', help='Exclude requests from services owned by the specified team(s). Only valid when teams are specified (via --teams parameter or config file).')
+    parser.add_argument('--excludeProducts', help='Optional: Exclude specified product/platform/domain names from totals, comma-separated (e.g., "External/Unknown,product-name")')
     parser.add_argument('--timeout', type=int, default=30, help='Request timeout in seconds (default: 30)')
     parser.add_argument('--rate-limit', type=float, default=1.0, help='Delay between API requests in seconds (default: 1.0)')
     parser.add_argument('--preserve-rate-limit', type=int, default=1, help='Number of requests to preserve from rate limit (default: 1, use 0 to consume full limit)')
@@ -1718,7 +1814,7 @@ def main():
     
     args = parser.parse_args()
     
-    # Load credentials, application aliases, skip list, service mappings, desired-end-categorizations, teams, and excludeSpecifiedTeamRequests from config file if not provided via command line
+    # Load credentials, application aliases, skip list, service mappings, desired-end-categorizations, teams, excludeSpecifiedTeamRequests, and exclude-products from config file if not provided via command line
     application_aliases = {}
     skip_applications = []
     service_mappings = {}
@@ -1726,16 +1822,18 @@ def main():
     remap_categorizations = {}
     config_teams = []
     config_exclude_team_requests = False
+    config_exclude_products = []
+    map_products = {}
     if not args.cookies and not args.api_key and not args.app_key:
-        config_api_key, config_app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests = load_datadog_config()
+        config_api_key, config_app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests, config_exclude_products, map_products = load_datadog_config()
         if config_api_key and config_app_key:
             args.api_key = config_api_key
             args.app_key = config_app_key
         else:
             parser.error('Authentication required: provide --cookies OR (--api-key and --app-key) OR create ~/.datadog.cfg with credentials')
     else:
-        # Still load application aliases, skip list, service mappings, desired-end-categorizations, remap-categorizations, teams, and excludeSpecifiedTeamRequests even if auth is provided via CLI
-        _, _, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests = load_datadog_config()
+        # Still load application aliases, skip list, service mappings, desired-end-categorizations, remap-categorizations, teams, excludeSpecifiedTeamRequests, exclude-products, and map-products even if auth is provided via CLI
+        _, _, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests, config_exclude_products, map_products = load_datadog_config()
     
     # Validate authentication combinations
     if args.api_key and not args.app_key:
@@ -1780,6 +1878,16 @@ def main():
     
     # Use config file excludeSpecifiedTeamRequests if not provided on command line
     exclude_team_requests = args.excludeSpecifiedTeamRequests or config_exclude_team_requests
+    
+    # Merge exclude-products from command line and config file
+    exclude_products = []
+    if args.excludeProducts:
+        # Parse comma-separated list and normalize (strip whitespace, lowercase for case-insensitive matching)
+        exclude_products = [p.strip().lower() for p in args.excludeProducts.split(',') if p.strip()]
+    elif config_exclude_products:
+        # Use exclude-products from config file if not provided on command line
+        exclude_products = [p.strip().lower() for p in config_exclude_products if p.strip()]
+        print(f"{Fore.CYAN}Using exclude-products from ~/.datadog.cfg: {', '.join(config_exclude_products)}{Style.RESET_ALL}")
     
     # Validate --excludeSpecifiedTeamRequests usage
     if exclude_team_requests and not team_filters:
@@ -1915,7 +2023,9 @@ def main():
         skip_applications=skip_applications,  # Pass skip list from config
         exclude_team_requests=exclude_team_requests,  # Exclude requests from specified team services (from CLI or config)
         desired_end_categorizations=desired_end_categorizations,  # Pass desired categorizations from config
-        remap_categorizations=remap_categorizations  # Pass remap categorizations from config
+        remap_categorizations=remap_categorizations,  # Pass remap categorizations from config
+        exclude_products=exclude_products,  # Pass exclude products from CLI or config
+        map_products=map_products  # Pass product mappings from config
     )
     
     # Run analysis

@@ -114,6 +114,14 @@ Cookies should be semicolon-separated (e.g., `"_dd_did=...; datadog-theme=light"
   --excludeSpecifiedTeamRequests
   ```
 
+- **`--excludeProducts`**: Exclude specified product/platform/domain names from totals, comma-separated
+  - Excluded products will appear in reports with `percentage: 0.0` and their traffic shown in `excluded_count`
+  - Useful for filtering out noise, internal products, or specific categories from percentage calculations
+  - Case-insensitive matching
+  ```bash
+  --excludeProducts "External/Unknown,product-name-1,product-name-2"
+  ```
+
 ### Examples
 
 **1. Basic usage with config file authentication:**
@@ -345,7 +353,93 @@ With this configuration, running the script will automatically exclude requests 
 python serviceConsumerAnalysis.py ... --teams "team1,team2" --excludeSpecifiedTeamRequests
 ```
 
-#### 6. Application Assignments (Optional)
+#### 6. Exclude Products (Optional)
+```json
+{
+  "exclude-products": [
+    "External/Unknown",
+    "product-name-1",
+    "product-name-2"
+  ]
+}
+```
+
+**Purpose**: Set the default list of product/platform/domain names to exclude from totals when not provided on the command line.
+
+**Behavior**:
+- If `--excludeProducts` is provided on command line, it takes precedence
+- If `--excludeProducts` is not provided, uses the value from config file
+- If neither is provided, no products are excluded (all included in totals)
+- Case-insensitive matching against product/platform/domain grouping names
+- Excluded products appear in reports with `percentage: 0.0` and traffic shown in `excluded_count`
+
+**Use Cases**:
+- Filter out External/Unknown services from percentage calculations
+- Exclude internal infrastructure products to focus on business product consumption
+- Consistent exclusion across multiple runs without command line flags
+
+**Example Configuration**:
+```json
+{
+  "exclude-products": [
+    "External/Unknown",
+    "internal-infrastructure",
+    "monitoring-tools"
+  ]
+}
+```
+
+With this configuration, these products will be excluded from percentage calculations but still visible in reports with their traffic shown as `excluded_count`.
+
+#### 7. Map Products (Optional)
+```json
+{
+  "map-products": {
+    "source-product-1": "target-product-1",
+    "source-product-2": "target-product-2",
+    "snapshots": "event"
+  }
+}
+```
+
+**Purpose**: Remap one product grouping to another product, consolidating traffic from multiple product names into a single target product.
+
+**Behavior**:
+- Applied AFTER product determination but BEFORE aggregation
+- Source product name (key) is case-insensitive
+- Target product name (value) is case-insensitive
+- All traffic from source product is added to target product's totals
+- Details preserve original calling service names
+- Source product will not appear in final reports (fully merged into target)
+
+**Use Cases**:
+- Consolidate closely related products (e.g., merge "snapshots" into "event")
+- Rename products without updating attribution data
+- Combine legacy and new product names during transitions
+- Group test/staging variants with production products
+
+**Example Configuration**:
+```json
+{
+  "map-products": {
+    "snapshots": "event",
+    "legacy-product": "new-product-name",
+    "product-staging": "product"
+  }
+}
+```
+
+With this configuration:
+- All traffic to services in the "snapshots" product will be counted as "event" product traffic
+- The "snapshots" product will not appear separately in reports
+- Percentages are calculated based on the merged totals
+
+**Important Notes**:
+- Mapping happens before exclusion checks, so you can map to an excluded product
+- If both source and target exist separately, all traffic is consolidated under the target name
+- Mapping is one-way only (source → target); for multiple sources to one target, add multiple entries
+
+#### 8. Application Assignments (Optional)
 ```json
 {
   "application-assignments": [
@@ -363,7 +457,8 @@ python serviceConsumerAnalysis.py ... --teams "team1,team2" --excludeSpecifiedTe
       "domain": "Domain A",
       "platform": "platform-x",
       "product": "product-y",
-      "system": "system-z"
+      "system": "system-z",
+      "team": "team-identifier"
     }
   ]
 }
@@ -372,6 +467,15 @@ python serviceConsumerAnalysis.py ... --teams "team1,team2" --excludeSpecifiedTe
 **Purpose**: Provides explicit domain/team assignments for services not found in attribution data.
 
 **Priority**: **Checked FIRST** before attempting fuzzy matching or attribution data lookup.
+
+**Fields**:
+- **`name`** (required): Service name to match
+- **`business-unit`**: Business unit assignment
+- **`domain`**: Domain assignment
+- **`platform`**: Platform assignment (used for product grouping fallback)
+- **`product`**: Product assignment (used for product grouping)
+- **`system`**: System assignment
+- **`team`**: Team identifier (used for team exclusion when `excludeSpecifiedTeamRequests` is enabled)
 
 **Use Cases**:
 - External services not in your team application catalog
@@ -384,6 +488,112 @@ python serviceConsumerAnalysis.py ... --teams "team1,team2" --excludeSpecifiedTe
 2. If found, use the configured metadata immediately
 3. If not found, proceed with fuzzy matching against attribution data
 4. If still not found, mark as "External/Unknown"
+
+**Team Exclusion**:
+When `excludeSpecifiedTeamRequests` is enabled and teams are specified:
+- If a service has a `team` field in application-assignments, that team is checked against excluded teams
+- Services from excluded teams (matched via application-assignments or attribution data) are excluded from totals
+- This allows external services to be explicitly assigned to teams for proper exclusion handling
+
+**Example with Team Exclusion**:
+```json
+{
+  "teams": ["identity", "platform"],
+  "excludeSpecifiedTeamRequests": true,
+  "application-assignments": [
+    {
+      "name": "external-auth-library",
+      "business-unit": "shared",
+      "domain": "External/Unknown",
+      "platform": "external",
+      "product": null,
+      "system": null,
+      "team": "identity"
+    }
+  ]
+}
+```
+
+In this example, when analyzing with teams `["identity", "platform"]`, the service `external-auth-library` will be excluded from totals because it's assigned to the "identity" team via application-assignments.
+
+### Complete Configuration Example
+
+Here's a comprehensive example showing all available configuration options in `~/.datadog.cfg`:
+
+```json
+{
+  "api-key": "your_datadog_api_key",
+  "app-key": "your_datadog_app_key",
+  "application-alias": {
+    "old-service-name": "new-service-name",
+    "service-variant-a": "canonical-service",
+    "legacy-name": "current-name"
+  },
+  "skip-applications": [
+    "test-harness",
+    "deprecated-service",
+    "internal-tool"
+  ],
+  "desired-end-categorizations": [
+    "event.*",
+    "registration",
+    "^billing$",
+    "payments"
+  ],
+  "remap-categorizations": {
+    "old-product-name": "new-product-name",
+    "variant-1": "consolidated-product",
+    "variant-2": "consolidated-product"
+  },
+  "teams": [
+    "identity",
+    "infrastructure",
+    "platform"
+  ],
+  "excludeSpecifiedTeamRequests": true,
+  "exclude-products": [
+    "External/Unknown",
+    "internal-tools",
+    "monitoring"
+  ],
+  "map-products": {
+    "snapshots": "event",
+    "legacy-product": "current-product",
+    "test-platform": "platform"
+  },
+  "application-assignments": [
+    {
+      "name": "external-library",
+      "business-unit": "shared",
+      "domain": "External/Unknown",
+      "platform": "external",
+      "product": null,
+      "system": null,
+      "team": null
+    },
+    {
+      "name": "third-party-api",
+      "business-unit": "shared",
+      "domain": "integrations",
+      "platform": "external-apis",
+      "product": "third-party",
+      "system": "api-gateway",
+      "team": "platform"
+    }
+  ]
+}
+```
+
+This configuration:
+- Authenticates with Datadog using API keys
+- Normalizes 3 service name variants to canonical names
+- Skips 3 test/deprecated services from all processing
+- Prioritizes 4 product patterns for grouping
+- Consolidates 3 old product names into 2 new ones
+- Excludes traffic from 3 specified teams
+- Excludes 3 products from percentage calculations
+- Maps 3 source products to their target products
+- Provides explicit assignments for 2 external services (including team assignment for exclusion)
 
 ## Input Data: allTeamApplications.json
 
@@ -530,11 +740,12 @@ Services that cannot be resolved to a known domain/product are categorized as "E
   "External/Unknown": {
     "count": 0,
     "percentage": 0.0,
+    "excluded_count": 56635,
     "details": [
       {
         "target_service": "your-service",
         "calling_service": "unresolved-service",
-        "count": 50000
+        "excluded_count": 50000
       }
     ]
   }
@@ -544,10 +755,45 @@ Services that cannot be resolved to a known domain/product are categorized as "E
 **Key Behaviors**:
 - **Count is 0**: External/Unknown services don't affect totals
 - **Percentage is 0%**: Excluded from percentage calculations
-- **Details preserved**: Actual call counts saved for reference
+- **Excluded_count shows actual traffic**: The real call count is preserved in `excluded_count`
+- **Presence of excluded_count**: Indicates this grouping is excluded from totals
+- **Details use excluded_count**: Each detail entry uses `excluded_count` instead of `count`
 - **Other percentages add to 100%**: Excluding External/Unknown
 
-This allows you to see what's calling your services without skewing metrics with unidentified callers.
+### Excluded Team Services
+
+When using `--excludeSpecifiedTeamRequests`, services owned by the specified teams are excluded from totals but still appear in reports:
+
+```json
+{
+  "team-product": {
+    "percentage": 0.0,
+    "excluded_count": 89,
+    "details": [
+      {
+        "target_service": "service-a",
+        "calling_service": "team-service-1",
+        "excluded_count": 49
+      },
+      {
+        "target_service": "service-b",
+        "calling_service": "team-service-2",
+        "excluded_count": 40
+      }
+    ]
+  }
+}
+```
+
+**Key Behaviors**:
+- Services owned by excluded teams are NOT counted in totals
+- The actual call counts are preserved in `excluded_count` fields
+- The presence of `excluded_count` (instead of `count`) indicates these are excluded entries
+- This allows you to see internal team traffic without skewing external consumer metrics
+
+The presence of the `excluded_count` field (instead of `count`) indicates a consumer grouping that has traffic but is not included in the total calculations. The `excluded_count` field shows the actual traffic volume for reference, while `percentage: 0.0` indicate these are not included in aggregate metrics.
+
+This allows you to see what's calling your services without skewing metrics with unidentified callers or internal team traffic.
 
 ## Features & Capabilities
 

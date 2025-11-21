@@ -295,18 +295,109 @@ def get_domain_info(backstage_url: str, domain_ref: str, timeout: int = 30) -> D
         return {}
 
 
+def get_user_info(backstage_url: str, user_ref: str, timeout: int = 30) -> Dict:
+    """
+    Query Backstage for user information.
+    
+    Args:
+        backstage_url: Base URL for Backstage instance
+        user_ref: User reference (e.g., "user:default/john.doe")
+        timeout: Request timeout in seconds
+        
+    Returns:
+        Dictionary with user information (name, email, title)
+    """
+    # Parse the user reference to get the user name
+    if ':' in user_ref and '/' in user_ref:
+        # Format: "user:default/john.doe"
+        user_name = user_ref.split('/')[-1]
+        namespace = user_ref.split('/')[0].split(':')[-1] if '/' in user_ref else 'default'
+    elif ':' in user_ref:
+        # Format: "user:john.doe"
+        user_name = user_ref.split(':')[-1]
+        namespace = 'default'
+    else:
+        # Just the username
+        user_name = user_ref
+        namespace = 'default'
+    
+    # Query the catalog for the user entity
+    catalog_url = f"{backstage_url}/api/catalog/entities/by-name/user/{namespace}/{user_name}"
+    
+    try:
+        response = requests.get(catalog_url, timeout=timeout)
+        response.raise_for_status()
+        
+        user_entity = response.json()
+        
+        metadata = user_entity.get('metadata', {})
+        spec = user_entity.get('spec', {})
+        profile = spec.get('profile', {})
+        
+        # Extract user information
+        display_name = profile.get('displayName') or metadata.get('title') or metadata.get('name', '')
+        email = profile.get('email', '')
+        
+        # Get title from metadata.description (primary location in this Backstage instance)
+        # Fall back to profile.role or other common fields if needed
+        title = metadata.get('description', '') or profile.get('role', '') or profile.get('jobTitle', '')
+        
+        return {
+            'name': display_name,
+            'email': email,
+            'title': title
+        }
+        
+    except requests.exceptions.RequestException:
+        # Return basic info if we can't fetch the user
+        return {
+            'name': user_name,
+            'email': '',
+            'title': ''
+        }
+
+
+def extract_team_members(team: Dict, backstage_url: str = None, timeout: int = 30) -> List[Dict]:
+    """
+    Extract team members and their information.
+    
+    Args:
+        team: Team entity from Backstage
+        backstage_url: Base URL for Backstage (to fetch user info)
+        timeout: Request timeout
+        
+    Returns:
+        List of member dictionaries with name, email, and title
+    """
+    if not backstage_url:
+        return []
+    
+    spec = team.get('spec', {})
+    members_refs = spec.get('members', [])
+    
+    if not members_refs:
+        return []
+    
+    members = []
+    for member_ref in members_refs:
+        member_info = get_user_info(backstage_url, member_ref, timeout)
+        members.append(member_info)
+    
+    return members
+
+
 def extract_team_info(team: Dict, debug: bool = False, backstage_url: str = None, timeout: int = 30) -> Dict:
     """
-    Extract team information including Domain, Business Unit, and Platform.
+    Extract team information including Domain, Business Unit, Platform, and Members.
     
     Args:
         team: Team entity from Backstage
         debug: Whether to print debug information
-        backstage_url: Base URL for Backstage (to fetch domain info)
+        backstage_url: Base URL for Backstage (to fetch domain info and member details)
         timeout: Request timeout
         
     Returns:
-        Dictionary with team metadata
+        Dictionary with team metadata including members
     """
     metadata = team.get('metadata', {})
     spec = team.get('spec', {})
@@ -386,6 +477,9 @@ def extract_team_info(team: Dict, debug: bool = False, backstage_url: str = None
     if platform:
         platform = platform.replace('-', ' ').title()
     
+    # Extract team members
+    members = extract_team_members(team, backstage_url=backstage_url, timeout=timeout)
+    
     return {
         'team_name': metadata.get('name', ''),
         'team_title': metadata.get('title', metadata.get('name', '')),
@@ -395,7 +489,8 @@ def extract_team_info(team: Dict, debug: bool = False, backstage_url: str = None
         'product': product,
         'platform': platform,
         'parent': parent,
-        'type': spec.get('type', None)
+        'type': spec.get('type', None),
+        'members': members
     }
 
 

@@ -10,4 +10,5 @@ JiraTools.iml
 single_ticket_test.xlsx
 team_ticket_defaults.xlsx
 ~*
+*.csv
 *.json*

@@ -73,6 +73,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Create standard Jira tickets from Excel data.")
     parser.add_argument("excel_file", help="Path to the Excel file containing team data", default="teams.xlsx")
     parser.add_argument("-c", "--create", action="store_true", help="Actually create tickets in Jira (default is dry-run mode)")
+    parser.add_argument("--csv", "--export-csv", dest="csv_file", metavar="FILE", help="Export tickets to CSV file for Jira import instead of creating them")
     
     # Team filtering parameters (mutually exclusive)
     team_group = parser.add_mutually_exclusive_group()
@@ -86,7 +87,8 @@ def parse_arguments():
                    "Component is determined by the 'Component' field in the Teams sheet (optional).\n"
                    "Priority is read from the 'Config' sheet with key 'Priority'.\n"
                    "Each ticket will be linked to the 'Epic Link' specified in the Teams sheet.\n"
-                   "Use --processTeams to specify which teams to process or --excludeTeams to exclude specific teams.")
+                   "Use --processTeams to specify which teams to process or --excludeTeams to exclude specific teams.\n"
+                   "Use --csv to export tickets to a CSV file for Jira import instead of creating them directly.")
     
     return parser.parse_args()
 
@@ -2125,6 +2127,7 @@ def create_jira_ticket(jira_client, project_key, issue_type, summary, descriptio
         
     except Exception as e:
         print(f"{Fore.RED}Error creating ticket: {str(e)}{Style.RESET_ALL}")
+
         print(f"{Fore.RED}Error type: {type(e).__name__}{Style.RESET_ALL}")
         raise
         
@@ -2705,8 +2708,40 @@ def process_sheet(args, file_path, sheet_name, jira_client, default_issue_type, 
     
     return created_tickets, skipped_tickets, dry_run_count
 
+def format_sprint_value(value):
+    """Format Sprint value to ensure it's an integer, not a float.
+    
+    Args:
+        value: The Sprint value (could be int, float, or string)
+        
+    Returns:
+        Integer sprint value or original value if not numeric
+    """
+    import pandas as pd
+    
+    # Check if value is a float that represents an integer
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    # Check if value is NaN
+    elif pd.isna(value):
+        return None
+    # Check if it's a string that looks like a float
+    elif isinstance(value, str):
+        try:
+            float_val = float(value)
+            if float_val.is_integer():
+                return int(float_val)
+        except (ValueError, AttributeError):
+            pass
+    
+    return value
+
 def add_to_team_field(team_data, field, value):
     """Add a value to a team's field, handling lists for multiple values."""
+    # Special handling for Sprint field to ensure it's an integer
+    if field == SPRINT_FIELD:
+        value = format_sprint_value(value)
+    
     if field in team_data:
         if isinstance(team_data[field], list):
             team_data[field].append(value)
@@ -3124,6 +3159,356 @@ def display_overall_summary(create_mode, all_created_tickets, all_skipped_ticket
             
         display_skipped_tickets(all_skipped_tickets)
 
+def export_tickets_to_csv(csv_file, tickets_data, custom_fields_mapping=None):
+    """Export ticket data to CSV file for Jira import.
+    
+    Args:
+        csv_file: Path to the output CSV file
+        tickets_data: List of ticket dictionaries with all the data
+        custom_fields_mapping: Dictionary mapping field names to custom field IDs
+    """
+    import csv
+    
+    if not tickets_data:
+        print(f"{Fore.YELLOW}No tickets to export to CSV{Style.RESET_ALL}")
+        return
+    
+    # Jira CSV import required and optional fields
+    # Required: Summary, Issue Type, Project Key
+    # Common optional: Description, Assignee, Reporter, Priority, Labels, Epic Link, Sprint, Component
+    
+    # Collect all unique field names from all tickets
+    all_fields = set()
+    for ticket in tickets_data:
+        all_fields.update(ticket.keys())
+    
+    # Define standard Jira CSV column names and their order
+    standard_columns = [
+        'Summary',
+        'Issue Type',
+        'Project Key',
+        'Description',
+        'Priority',
+        'Assignee',
+        'Epic Link',
+        'Sprint',
+        'Component',
+        'Labels'
+    ]
+    
+    # Start with standard columns that exist in the data
+    csv_columns = [col for col in standard_columns if col in all_fields]
+    
+    # Add custom fields and any other fields not in standard list
+    custom_columns = sorted([f for f in all_fields if f not in standard_columns])
+    csv_columns.extend(custom_columns)
+    
+    # Write CSV file
+    try:
+        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=csv_columns, extrasaction='ignore')
+            writer.writeheader()
+            
+            for ticket in tickets_data:
+                # Prepare row with proper formatting
+                row = {}
+                for col in csv_columns:
+                    value = ticket.get(col, '')
+                    
+                    # Handle None values
+                    if value is None:
+                        row[col] = ''
+                    # Handle list values (like labels, components)
+                    elif isinstance(value, list):
+                        row[col] = ', '.join(str(v) for v in value)
+                    # Handle dict values (extract 'value' or 'name' key if present)
+                    elif isinstance(value, dict):
+                        if 'value' in value:
+                            row[col] = value['value']
+                        elif 'name' in value:
+                            row[col] = value['name']
+                        else:
+                            row[col] = str(value)
+                    # Special handling for Sprint field - ensure integer format
+                    elif col == 'Sprint' and isinstance(value, float) and value.is_integer():
+                        row[col] = str(int(value))
+                    # Special handling for numeric values that should be integers
+                    elif isinstance(value, float) and value.is_integer():
+                        row[col] = str(int(value))
+                    else:
+                        row[col] = str(value)
+                
+                writer.writerow(row)
+        
+        print(f"{Fore.GREEN}Successfully exported {len(tickets_data)} tickets to {csv_file}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}CSV columns: {', '.join(csv_columns)}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}You can now import this file into Jira using: Project Settings > Import > CSV{Style.RESET_ALL}")
+        
+    except Exception as e:
+        print(f"{Fore.RED}Error writing CSV file: {str(e)}{Style.RESET_ALL}")
+        import traceback
+        print(f"{Fore.RED}Stack trace: {traceback.format_exc()}{Style.RESET_ALL}")
+
+def collect_ticket_data_for_csv(df, default_issue_type, team_mapping, sheet_name, priority, custom_fields_mapping, excel_file, args):
+    """Collect ticket data for CSV export without creating tickets.
+    
+    Args:
+        df: DataFrame with ticket data
+        default_issue_type: Default issue type
+        team_mapping: Team information mapping
+        sheet_name: Name of the sheet being processed
+        priority: Priority value from config
+        custom_fields_mapping: Custom field mappings
+        excel_file: Path to Excel file
+        args: Command-line arguments
+        
+    Returns:
+        List of ticket dictionaries ready for CSV export
+    """
+    tickets_data = []
+    
+    # Group by 'Key' to process each unique key
+    ticket_data = group_rows_by_key(df)
+    
+    # Collect data for each unique key
+    for key, fields in ticket_data.items():
+        # Check if team was filtered out
+        if team_mapping is not None and key not in team_mapping:
+            continue
+        
+        # Check if this team has any category selections
+        if not has_category_selections(fields):
+            print(f"{Fore.YELLOW}Skipping ticket for '{key}' - no categories selected{Style.RESET_ALL}")
+            continue
+        
+        # Prepare ticket fields
+        summary, description, additional_fields, team_project, team_issue_type = prepare_ticket_fields(
+            fields, key, team_mapping, sheet_name
+        )
+        
+        # Skip if no project key
+        if not team_project:
+            print(f"{Fore.YELLOW}Skipping ticket for '{key}' - no Project field specified{Style.RESET_ALL}")
+            continue
+        
+        # Use team-specific issue type if available
+        issue_type = team_issue_type if team_issue_type else default_issue_type
+        
+        # Build ticket data dictionary for CSV
+        ticket_dict = {
+            'Summary': summary,
+            'Issue Type': issue_type,
+            'Project Key': team_project,
+            'Description': description
+        }
+        
+        # Add priority if specified
+        if priority:
+            ticket_dict['Priority'] = priority
+        
+        # Add additional fields
+        for field_name, field_value in additional_fields.items():
+            # Skip internal flags
+            if field_name == 'is_filtered_out':
+                continue
+            
+            # Map field names to Jira-friendly names
+            if field_name == ASSIGNEE_FIELD:
+                ticket_dict['Assignee'] = field_value
+            elif field_name == EPIC_LINK_FIELD:
+                ticket_dict['Epic Link'] = field_value
+            elif field_name == SPRINT_FIELD:
+                ticket_dict['Sprint'] = format_sprint_value(field_value)
+            elif field_name.lower() == 'component':
+                ticket_dict['Component'] = field_value
+            elif field_name.lower() == 'labels':
+                ticket_dict['Labels'] = field_value
+            else:
+                # For custom fields or other fields, use the field name as-is
+                ticket_dict[field_name] = field_value
+        
+        tickets_data.append(ticket_dict)
+        
+        # Display what would be exported
+        print(f"{Fore.BLUE}Collecting ticket: '{summary}' for key '{key}' in project {team_project}{Style.RESET_ALL}")
+    
+    return tickets_data
+
+def process_all_sheets_for_csv(args, file_path, available_sheets, default_issue_type, team_mapping, priority, custom_fields_mapping):
+    """Process teams using Backstage API and collect ticket data for CSV export.
+    
+    Args:
+        args: Command-line arguments
+        file_path: Path to Excel file
+        available_sheets: Available sheets in the Excel file
+        default_issue_type: Default issue type
+        team_mapping: Team information mapping
+        priority: Priority value from config
+        custom_fields_mapping: Custom field mappings
+        
+    Returns:
+        List of all ticket dictionaries ready for CSV export
+    """
+    all_tickets_data = []
+    
+    # Read Excel config to get Backstage URL and categories
+    excel_config = read_config_sheet(file_path)
+    backstage_url = get_backstage_url_from_config(excel_config)
+    categories = get_categories_from_config(excel_config)
+    
+    if not backstage_url:
+        print(f"{Fore.RED}Error: Backstage URL not found in Config sheet.{Style.RESET_ALL}")
+        print(f"{Fore.RED}Please add a 'Backstage' key with the base URL (e.g., https://backstage.core.cvent.org) to the Config sheet.{Style.RESET_ALL}")
+        return all_tickets_data
+    
+    print(f"{Fore.CYAN}Using Backstage URL: {backstage_url}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Will process categories: {', '.join(categories)}{Style.RESET_ALL}")
+    
+    # Filter teams based on arguments
+    filtered_team_mapping = filter_team_mapping(team_mapping, args)
+    
+    # Display team-specific projects and issue types for user information
+    display_team_projects(filtered_team_mapping)
+    display_team_issue_types(filtered_team_mapping)
+    
+    print(f"\n{Fore.CYAN}Collecting ticket data from Backstage for CSV export...{Style.RESET_ALL}")
+    
+    # Process each team using Backstage data
+    for team_name, team_config in filtered_team_mapping.items():
+        print(f"\n{Fore.CYAN}=== Processing team: {team_name} ==={Style.RESET_ALL}")
+        
+        # Get team's scorecard data from Backstage using configured categories
+        team_categories = get_team_categories_from_backstage(backstage_url, team_name, categories)
+        
+        if team_categories:
+            # Process each category that has data
+            for category_name, category_data in team_categories.items():
+                print(f"{Fore.CYAN}Processing category: {category_name} for team {team_name}{Style.RESET_ALL}")
+                
+                # Collect ticket data for this team/category combination
+                ticket_data = collect_ticket_data_from_backstage(
+                    team_name, category_name, category_data, team_config,
+                    default_issue_type, priority
+                )
+                
+                if ticket_data:
+                    all_tickets_data.append(ticket_data)
+        else:
+            print(f"{Fore.YELLOW}No scorecard data found for team: {team_name}{Style.RESET_ALL}")
+    
+    print(f"\n{Fore.GREEN}Collected {len(all_tickets_data)} tickets for CSV export{Style.RESET_ALL}")
+    return all_tickets_data
+
+def collect_ticket_data_from_backstage(team_name, category_name, category_data, team_config, default_issue_type, priority):
+    """Collect ticket data from Backstage for CSV export.
+    
+    Args:
+        team_name: Name of the team
+        category_name: Name of the category
+        category_data: Category compliance data
+        team_config: Team configuration from Teams sheet
+        default_issue_type: Default issue type
+        priority: Priority value
+        
+    Returns:
+        Dictionary with ticket data for CSV export
+    """
+    # Prepare ticket data similar to existing logic
+    summary = f"{team_name} Scorecards Improvement: {category_name}"
+    
+    # Build detailed description from compliance analysis
+    description = f"*Backstage Scorecards Category:* {category_name}\\n\\n"
+    
+    if category_data and isinstance(category_data, dict):
+        # Handle new detailed compliance analysis format
+        if 'current_level' in category_data:
+            current_level = category_data.get('current_level', 'L0')
+            improvement_details = category_data.get('improvement_details', [])
+            
+            description += f"*Current Compliance Level:* {current_level}\\n\\n"
+            
+            if improvement_details:
+                total_opportunities = len(improvement_details)
+                description += f"*Improvement Opportunities:* ({total_opportunities} total)\\n\\n"
+                
+                # Group improvement details by level
+                grouped_by_level = {}
+                for detail in improvement_details:
+                    level_category = detail.get('level_category', 'L1')
+                    if level_category not in grouped_by_level:
+                        grouped_by_level[level_category] = []
+                    grouped_by_level[level_category].append(detail)
+                
+                # Sort levels
+                sorted_levels = sorted(grouped_by_level.keys(), key=lambda x: (len(x), x))
+                
+                # Generate description grouped by level
+                for level_category in sorted_levels:
+                    level_details = grouped_by_level[level_category]
+                    description += f"**{level_category} Issues:**\\n"
+                    
+                    for detail in level_details:
+                        level_name = detail['level_name']
+                        threshold = detail['threshold']
+                        current_count = detail['current_count']
+                        total_count = detail['total_count']
+                        needed_count = detail['needed_count']
+                        percentage = detail['percentage']
+                        
+                        description += f"  • **{level_name}** - {threshold}:\\n"
+                        description += f"    - Current: {current_count}/{total_count} components ({percentage}%)\\n"
+                        description += f"    - Need to improve: {needed_count} additional components\\n\\n"
+                    
+                    description += "\\n"
+            else:
+                description += "Team is at maximum compliance level for this category.\\n"
+        else:
+            # Handle legacy format
+            description += "*Address the Following Compliance Level(s):*\\n"
+            for level, value in category_data.items():
+                if value:
+                    description += f"* {level}: {value}\\n"
+    else:
+        description += "No specific compliance levels identified.\\n"
+    
+    # Get project key and issue type from team config
+    project_key = team_config.get(PROJECT_FIELD, '')
+    team_issue_type = team_config.get(ISSUE_TYPE_KEY, default_issue_type)
+    
+    if not project_key:
+        print(f"{Fore.YELLOW}Skipping ticket for '{team_name}' - no Project field specified{Style.RESET_ALL}")
+        return None
+    
+    # Build ticket data dictionary
+    ticket_dict = {
+        'Summary': summary,
+        'Issue Type': team_issue_type,
+        'Project Key': project_key,
+        'Description': description,
+        'Sprint Team': team_name
+    }
+    
+    # Add priority if specified
+    if priority:
+        ticket_dict['Priority'] = priority
+    
+    # Add optional fields from team config
+    if ASSIGNEE_FIELD in team_config:
+        ticket_dict['Assignee'] = team_config[ASSIGNEE_FIELD]
+    
+    if EPIC_LINK_FIELD in team_config:
+        ticket_dict['Epic Link'] = team_config[EPIC_LINK_FIELD]
+    
+    if SPRINT_FIELD in team_config:
+        ticket_dict['Sprint'] = format_sprint_value(team_config[SPRINT_FIELD])
+    
+    if 'Component' in team_config:
+        ticket_dict['Component'] = team_config['Component']
+    
+    print(f"{Fore.BLUE}Collected ticket: '{summary}' for project {project_key}{Style.RESET_ALL}")
+    
+    return ticket_dict
+
 def main():
     # Initialize colorama
     init()
@@ -3194,6 +3579,27 @@ def main():
     category_count = len(SHEET_NAMES)  # Ownership, Quality, Security, Reliability
     
     print(f"{Fore.CYAN}Will query Backstage for {team_count} teams across {category_count} categories{Style.RESET_ALL}")
+    
+    # Check if CSV export mode is enabled
+    if args.csv_file:
+        if args.create:
+            print(f"{Fore.YELLOW}Warning: --create flag is ignored when using CSV export mode{Style.RESET_ALL}")
+        
+        print(f"{Fore.CYAN}CSV Export Mode: Will export tickets to {args.csv_file}{Style.RESET_ALL}")
+        
+        # Load custom fields mapping if available
+        custom_fields_mapping = None
+        if CUSTOM_FIELDS_SHEET in available_sheets:
+            custom_fields_mapping = read_custom_fields_mapping(args.excel_file)
+        
+        # Process all sheets and collect ticket data for CSV export
+        all_tickets_data = process_all_sheets_for_csv(
+            args, args.excel_file, available_sheets, issue_type, team_mapping, priority, custom_fields_mapping
+        )
+        
+        # Export to CSV
+        export_tickets_to_csv(args.csv_file, all_tickets_data, custom_fields_mapping)
+        return
     
     # Confirm operation with user
     issue_type = confirm_operation(args, category_count, issue_type)

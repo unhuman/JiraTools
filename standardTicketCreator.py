@@ -2956,7 +2956,7 @@ def process_team_category_from_backstage(args, team_name, category_name, categor
         summary = f"{team_name} Scorecards Improvement: {category_name}"
         
         # Build detailed description from compliance analysis
-        description = f"*Backstage Scorecards Category:* {category_name}\n\n"
+        description = f"*Backstage Scorecards Category:* {category_name}\\n\\n"
         
         if category_data and isinstance(category_data, dict):
             # Handle new detailed compliance analysis format
@@ -2964,11 +2964,11 @@ def process_team_category_from_backstage(args, team_name, category_name, categor
                 current_level = category_data.get('current_level', 'L0')
                 improvement_details = category_data.get('improvement_details', [])
                 
-                description += f"*Current Compliance Level:* {current_level}\n\n"
+                description += f"*Current Compliance Level:* {current_level}\\n\\n"
                 
                 if improvement_details:
                     total_opportunities = len(improvement_details)
-                    description += f"*Improvement Opportunities:* ({total_opportunities} total)\n\n"
+                    description += f"*Improvement Opportunities:* ({total_opportunities} total)\\n\\n"
                     
                     # Group improvement details by level
                     grouped_by_level = {}
@@ -2984,7 +2984,7 @@ def process_team_category_from_backstage(args, team_name, category_name, categor
                     # Generate description grouped by level
                     for level_category in sorted_levels:
                         level_details = grouped_by_level[level_category]
-                        description += f"**{level_category} Issues:**\n"
+                        description += f"*{level_category} Issues:*\\n"
                         
                         for detail in level_details:
                             level = detail['level']
@@ -3001,35 +3001,35 @@ def process_team_category_from_backstage(args, team_name, category_name, categor
                                 state = detail.get('state', 'failed')
                                 target = detail.get('target', {})
                                 
-                                description += f"  • **{level_name}**:\n"
-                                description += f"    - Check: `{check_id}`\n"
-                                description += f"    - Status: {state.upper()}\n"
-                                description += f"    - Current: {current_count}/{total_count} components ({percentage:.0f}%)\n"
+                                description += f"* *{level_name}*:\\n"
+                                description += f"** Check: {{monospace}}{check_id}{{monospace}}\\n"
+                                description += f"** Status: {state.upper()}\\n"
+                                description += f"** Current: {current_count}/{total_count} components ({percentage:.0f}%)\\n"
                                 
                                 if target:
                                     target_range = f"{target.get('lower', '??')}-{target.get('upper', '??')}%"
-                                    description += f"    - Target: {target_range}\n"
+                                    description += f"** Target: {target_range}\\n"
                                 
                                 if needed_count > 0:
-                                    description += f"    - **Action Required**: Fix {needed_count} additional component{'s' if needed_count != 1 else ''}\n"
-                                description += "\n"
+                                    description += f"** *Action Required*: Fix {needed_count} additional component{'s' if needed_count != 1 else ''}\\n"
+                                description += "\\n"
                             else:
                                 # Traditional level-based or synthetic description
-                                description += f"  • **{level_name}** - {threshold}:\n"
-                                description += f"    - Current: {current_count}/{total_count} components ({percentage}%)\n"
-                                description += f"    - Need to improve: {needed_count} additional components\n\n"
+                                description += f"* *{level_name}* - {threshold}:\\n"
+                                description += f"** Current: {current_count}/{total_count} components ({percentage}%)\\n"
+                                description += f"** Need to improve: {needed_count} additional components\\n\\n"
                         
-                        description += "\n"  # Extra spacing between level groups
+                        description += "\\n"  # Extra spacing between level groups
                 else:
-                    description += "Team is at maximum compliance level for this category.\n"
+                    description += "Team is at maximum compliance level for this category.\\n"
             else:
                 # Handle legacy format for backward compatibility
-                description += "*Address the Following Compliance Level(s):*\n"
+                description += "*Address the Following Compliance Level(s):*\\n"
                 for level, value in category_data.items():
                     if value:
-                        description += f"* {level}: {value}\n"
+                        description += f"* {level}: {value}\\n"
         else:
-            description += "No specific compliance levels identified.\n"
+            description += "No specific compliance levels identified.\\n"
         
         # Get team configuration
         project_key = team_config.get('Project')
@@ -3160,18 +3160,32 @@ def display_overall_summary(create_mode, all_created_tickets, all_skipped_ticket
         display_skipped_tickets(all_skipped_tickets)
 
 def export_tickets_to_csv(csv_file, tickets_data, custom_fields_mapping=None):
-    """Export ticket data to CSV file for Jira import.
+    """Export ticket data to CSV files, creating one file per Sprint Team.
     
     Args:
-        csv_file: Path to the output CSV file
+        csv_file: Base path for output CSV files (will be modified to include team name)
         tickets_data: List of ticket dictionaries with all the data
         custom_fields_mapping: Dictionary mapping field names to custom field IDs
     """
     import csv
+    import os
     
     if not tickets_data:
         print(f"{Fore.YELLOW}No tickets to export to CSV{Style.RESET_ALL}")
         return
+    
+    # Group tickets by Sprint Team
+    tickets_by_team = {}
+    for ticket in tickets_data:
+        team = ticket.get('Sprint Team', 'NoTeam')
+        if team not in tickets_by_team:
+            tickets_by_team[team] = []
+        tickets_by_team[team].append(ticket)
+    
+    # Parse the base filename to insert team name
+    csv_path = os.path.splitext(csv_file)
+    base_name = csv_path[0]
+    extension = csv_path[1] if csv_path[1] else '.csv'
     
     # Jira CSV import required and optional fields
     # Required: Summary, Issue Type, Project Key
@@ -3187,13 +3201,14 @@ def export_tickets_to_csv(csv_file, tickets_data, custom_fields_mapping=None):
         'Summary',
         'Issue Type',
         'Project Key',
-        'Description',
         'Priority',
         'Assignee',
         'Epic Link',
         'Sprint',
         'Component',
-        'Labels'
+        'Labels',
+        'Sprint Team',
+        'Description'
     ]
     
     # Start with standard columns that exist in the data
@@ -3203,51 +3218,68 @@ def export_tickets_to_csv(csv_file, tickets_data, custom_fields_mapping=None):
     custom_columns = sorted([f for f in all_fields if f not in standard_columns])
     csv_columns.extend(custom_columns)
     
-    # Write CSV file
-    try:
-        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=csv_columns, extrasaction='ignore')
-            writer.writeheader()
-            
-            for ticket in tickets_data:
-                # Prepare row with proper formatting
-                row = {}
-                for col in csv_columns:
-                    value = ticket.get(col, '')
-                    
-                    # Handle None values
-                    if value is None:
-                        row[col] = ''
-                    # Handle list values (like labels, components)
-                    elif isinstance(value, list):
-                        row[col] = ', '.join(str(v) for v in value)
-                    # Handle dict values (extract 'value' or 'name' key if present)
-                    elif isinstance(value, dict):
-                        if 'value' in value:
-                            row[col] = value['value']
-                        elif 'name' in value:
-                            row[col] = value['name']
-                        else:
-                            row[col] = str(value)
-                    # Special handling for Sprint field - ensure integer format
-                    elif col == 'Sprint' and isinstance(value, float) and value.is_integer():
-                        row[col] = str(int(value))
-                    # Special handling for numeric values that should be integers
-                    elif isinstance(value, float) and value.is_integer():
-                        row[col] = str(int(value))
-                    else:
-                        row[col] = str(value)
+    # Write separate CSV file for each team
+    total_exported = 0
+    exported_files = []
+    
+    for team, team_tickets in sorted(tickets_by_team.items()):
+        # Create team-specific filename
+        team_csv_file = f"{base_name}-{team}{extension}"
+        
+        try:
+            with open(team_csv_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=csv_columns, extrasaction='ignore', quoting=csv.QUOTE_NONNUMERIC)
+                writer.writeheader()
                 
-                writer.writerow(row)
-        
-        print(f"{Fore.GREEN}Successfully exported {len(tickets_data)} tickets to {csv_file}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}CSV columns: {', '.join(csv_columns)}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}You can now import this file into Jira using: Project Settings > Import > CSV{Style.RESET_ALL}")
-        
-    except Exception as e:
-        print(f"{Fore.RED}Error writing CSV file: {str(e)}{Style.RESET_ALL}")
-        import traceback
-        print(f"{Fore.RED}Stack trace: {traceback.format_exc()}{Style.RESET_ALL}")
+                for ticket in team_tickets:
+                    # Prepare row with proper formatting
+                    row = {}
+                    for col in csv_columns:
+                        value = ticket.get(col, '')
+                        
+                        # Handle None values
+                        if value is None:
+                            row[col] = ''
+                        # Handle list values (like labels, components)
+                        elif isinstance(value, list):
+                            row[col] = ', '.join(str(v) for v in value)
+                        # Handle dict values (extract 'value' or 'name' key if present)
+                        elif isinstance(value, dict):
+                            if 'value' in value:
+                                row[col] = value['value']
+                            elif 'name' in value:
+                                row[col] = value['name']
+                            else:
+                                row[col] = str(value)
+                        # Special handling for Sprint field - ensure integer format
+                        elif col == 'Sprint' and isinstance(value, float) and value.is_integer():
+                            row[col] = str(int(value))
+                        # Special handling for numeric values that should be integers
+                        elif isinstance(value, float) and value.is_integer():
+                            row[col] = str(int(value))
+                        else:
+                            # Convert escaped newlines to real newlines for CSV
+                            str_value = str(value)
+                            row[col] = str_value.replace('\\n', '\n')
+                    
+                    writer.writerow(row)
+            
+            print(f"{Fore.GREEN}Successfully exported {len(team_tickets)} tickets for team '{team}' to {team_csv_file}{Style.RESET_ALL}")
+            total_exported += len(team_tickets)
+            exported_files.append(team_csv_file)
+            
+        except Exception as e:
+            print(f"{Fore.RED}Error writing CSV file for team '{team}': {str(e)}{Style.RESET_ALL}")
+            import traceback
+            print(f"{Fore.RED}Stack trace: {traceback.format_exc()}{Style.RESET_ALL}")
+    
+    # Summary
+    print(f"\n{Fore.CYAN}=== CSV Export Summary ==={Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Total tickets exported: {total_exported}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Files created: {len(exported_files)}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}CSV columns: {', '.join(csv_columns)}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}You can now import these files into Jira using: Project Settings > Import > CSV{Style.RESET_ALL}")
+
 
 def collect_ticket_data_for_csv(df, default_issue_type, team_mapping, sheet_name, priority, custom_fields_mapping, excel_file, args):
     """Collect ticket data for CSV export without creating tickets.
@@ -3445,7 +3477,7 @@ def collect_ticket_data_from_backstage(team_name, category_name, category_data, 
                 # Generate description grouped by level
                 for level_category in sorted_levels:
                     level_details = grouped_by_level[level_category]
-                    description += f"**{level_category} Issues:**\\n"
+                    description += f"*{level_category} Issues:*\\n"
                     
                     for detail in level_details:
                         level_name = detail['level_name']
@@ -3455,9 +3487,9 @@ def collect_ticket_data_from_backstage(team_name, category_name, category_data, 
                         needed_count = detail['needed_count']
                         percentage = detail['percentage']
                         
-                        description += f"  • **{level_name}** - {threshold}:\\n"
-                        description += f"    - Current: {current_count}/{total_count} components ({percentage}%)\\n"
-                        description += f"    - Need to improve: {needed_count} additional components\\n\\n"
+                        description += f"* *{level_name}* - {threshold}:\\n"
+                        description += f"** Current: {current_count}/{total_count} components ({percentage}%)\\n"
+                        description += f"** Need to improve: {needed_count} additional components\\n\\n"
                     
                     description += "\\n"
             else:

@@ -55,7 +55,8 @@ python standardTicketCreator.py excel_file [options]
 ### Command-line Arguments
 - `excel_file`: Path to the Excel file containing team data (required)
 - `-i, --issue_type`: Issue type (e.g., 'Task', 'Story', 'Bug'). If provided, overrides the value in the Teams sheet.
-- `-c, --create`: Actually create tickets in Jira. Without this flag, the script runs in dry-run mode
+- `-c, --create`: Actually create tickets in Jira via API. Without this flag, the script runs in dry-run mode
+- `--csv, --export-csv`: Export tickets to CSV file(s) for manual Jira import instead of creating via API. Creates one CSV file per team named `{basename}-{TeamName}.csv`
 - `--processTeams`: Comma-separated list of teams to process (only these teams will be included)
 - `--excludeTeams`: Comma-separated list of teams to exclude from processing
 
@@ -65,6 +66,8 @@ The issue type is determined in this order of precedence:
 3. Default value "Task" if none of the above is available
 
 Additionally, the script uses the Priority value from the Config sheet with key "Priority" if present. This priority will be applied to all tickets created.
+
+**Note**: The `-c/--create` and `--csv/--export-csv` options are mutually exclusive. Use `-c` to create tickets directly via Jira API, or use `--csv` to export to CSV files for manual import.
 
 #### Team Filtering
 The `--processTeams` and `--excludeTeams` arguments are mutually exclusive and provide ways to filter which teams get tickets created:
@@ -78,11 +81,17 @@ The `--processTeams` and `--excludeTeams` arguments are mutually exclusive and p
 # Dry run (no tickets created)
 python standardTicketCreator.py team_ticket_defaults.xlsx
 
-# Create tickets as Tasks
+# Create tickets directly via Jira API as Tasks
 python standardTicketCreator.py team_ticket_defaults.xlsx -c
 
 # Create tickets as Stories
 python standardTicketCreator.py team_ticket_defaults.xlsx -i Story -c
+
+# Export to CSV files for manual import (one file per team)
+python standardTicketCreator.py team_ticket_defaults.xlsx --csv output.csv
+
+# Export to CSV for specific teams only
+python standardTicketCreator.py team_ticket_defaults.xlsx --csv output.csv --processTeams "TeamA,TeamB"
 
 # Process only specific teams
 python standardTicketCreator.py team_ticket_defaults.xlsx --processTeams "TeamA,TeamB,TeamC"
@@ -135,13 +144,230 @@ This section walks through a complete workflow example:
 
 4. **Make Any Necessary Adjustments** to your Excel file.
 
-5. **Create Tickets**:
+5. **Create Tickets** (choose one method):
+   
+   **Option A: Direct API Creation**
    ```bash
    python standardTicketCreator.py my_teams.xlsx -c
    ```
 
+   **Option B: CSV Export for Manual Import**
+   ```bash
+   python standardTicketCreator.py my_teams.xlsx --csv output.csv
+   ```
+   This creates separate CSV files per team (e.g., `output-Analytics.csv`, `output-Vroom.csv`)
+
 6. **Verify in Jira**:
-   Check that tickets were created with the correct fields and epic links.
+   - If using API creation: Check that tickets were created with the correct fields and epic links
+   - If using CSV export: Import each CSV file using Jira's CSV importer (see [CSV Import Instructions](#csv-export-and-jira-import))
+
+## CSV Export and Jira Import
+
+### Overview
+
+The script supports exporting ticket data to CSV files for manual import into Jira. This is useful when:
+- You want to review ticket data before importing
+- You need to import into multiple projects with different configurations
+- Your Jira instance has API restrictions or special requirements
+- You want to use Jira's CSV import configuration features
+
+### CSV Export Features
+
+**Automatic Team Separation**: The script creates one CSV file per team, making it easier to import tickets into different projects or manage imports by team.
+
+**File Naming**: If you specify `--csv output.csv`, the script generates:
+- `output-Analytics.csv`
+- `output-Vroom.csv`
+- `output-SimpliFly.csv`
+- etc. (one file per Sprint Team)
+
+**CSV Format**: The CSV files follow Jira's import requirements:
+- Uses proper CSV quoting (`QUOTE_NONNUMERIC`) - all strings are quoted, numbers are not
+- Description is the last column to handle multi-line content properly
+- Column order: Summary, Issue Type, Project Key, Priority, Assignee, Epic Link, Sprint, Component, Labels, Sprint Team, Description
+- Proper newline handling in multi-line Description fields
+- Jira wiki markup formatting preserved
+
+### Exporting to CSV
+
+```bash
+# Export all teams
+python standardTicketCreator.py team_ticket_defaults.xlsx --csv output.csv
+
+# Export specific teams only
+python standardTicketCreator.py team_ticket_defaults.xlsx --csv output.csv --processTeams "TeamA,TeamB"
+
+# Export excluding certain teams
+python standardTicketCreator.py team_ticket_defaults.xlsx --csv output.csv --excludeTeams "ProblemTeam"
+```
+
+### Importing CSV Files into Jira
+
+After generating CSV files, you can import them into Jira:
+
+#### Step 1: Open Jira CSV Importer
+
+1. Navigate to your Jira project (e.g., the project specified in your Teams sheet)
+2. Click on Project Settings (gear icon)
+3. Select "Import" from the left sidebar
+4. Choose "CSV" as the import source
+
+#### Step 2: Upload CSV File
+
+1. Click "Choose File" and select one of the generated CSV files (e.g., `output-Analytics.csv`)
+2. Click "Next"
+
+#### Step 3: Configure Field Mappings
+
+Jira will automatically detect most fields, but you should verify the mappings:
+
+**Standard Field Mappings** (usually auto-detected):
+- Summary → Summary
+- Issue Type → Issue Type
+- Project Key → (automatically determined from project)
+- Description → Description
+- Priority → Priority
+- Assignee → Assignee
+- Component → Components
+- Labels → Labels
+
+**Custom Field Mappings** (may need manual configuration):
+- Sprint Team → Your custom "Sprint Team" field (e.g., `customfield_12900`)
+- Epic Link → Epic Link (e.g., `customfield_10506`)
+- Sprint → Sprint (e.g., `customfield_10505`)
+
+**IMPORTANT**: Make sure the Description field mapping does NOT create value mappings. See the configuration note below.
+
+#### Step 4: Configure Value Mappings
+
+**Critical Configuration**: In the "Map field values" step, ensure that:
+- **DO NOT** create value mappings for the Description field
+- The `config.value.mappings` section should be empty: `"config.value.mappings" : { }`
+- If Jira auto-generates value mappings for Description, delete them
+
+**Why This Matters**: Jira's CSV importer may try to create value mappings that strip newlines from multi-line descriptions, causing them to become single-line text.
+
+#### Step 5: Import Configuration File
+
+You can use a pre-configured import configuration to ensure consistent imports. The repository includes a template configuration file: `JiraImport-generic-configuration.txt`
+
+**To use the configuration file**:
+
+1. Open `JiraImport-generic-configuration.txt` in a text editor
+2. Update the project information:
+   ```json
+   "config.project" : {
+     "project.type" : null,
+     "project.key" : "YOUR_PROJECT_KEY",
+     "project.description" : null,
+     "project.url" : null,
+     "project.name" : "YOUR_PROJECT_NAME",
+     "project.lead" : "your_username"
+   }
+   ```
+3. Update custom field IDs if they differ in your Jira instance:
+   ```json
+   "Sprint Team" : {
+     "existing.custom.field" : "12900"  // Update if different
+   },
+   "Sprint" : {
+     "existing.custom.field" : "10505"  // Update if different
+   },
+   "Epic Link" : {
+     "existing.custom.field" : "10506"  // Update if different
+   }
+   ```
+4. In the Jira CSV importer, after uploading your CSV file, you can import this configuration by clicking "Import configuration" and selecting your updated configuration file
+5. Review the mappings and proceed with the import
+
+**Configuration Template** (from `JiraImport-generic-configuration.txt`):
+```json
+{
+  "config.version" : "2.0",
+  "config.project.from.csv" : "false",
+  "config.encoding" : "UTF-8",
+  "config.email.suffix" : "@",
+  "config.field.mappings" : {
+    "Assignee" : { "jira.field" : "assignee" },
+    "Issue Type" : { "jira.field" : "issuetype" },
+    "Description" : { "jira.field" : "description" },
+    "Sprint Team" : { "existing.custom.field" : "12900" },
+    "Priority" : { "jira.field" : "priority" },
+    "Summary" : { "jira.field" : "summary" },
+    "Sprint" : { "existing.custom.field" : "10505" },
+    "Component" : { "jira.field" : "components" },
+    "Epic Link" : { "existing.custom.field" : "10506" }
+  },
+  "config.value.mappings" : { },
+  "config.delimiter" : ",",
+  "config.project" : {
+    "project.key" : "BAD",
+    "project.name" : "CHANGE ME",
+    "project.lead" : "unknown"
+  },
+  "config.date.format" : "dd/MMM/yy h:mm a"
+}
+```
+
+**Key Points**:
+- `config.value.mappings` must be empty (`{ }`)
+- Update `project.key`, `project.name`, and `project.lead` to match your target project
+- Verify custom field IDs match your Jira instance (use `findCustomFields.py` to discover them)
+
+#### Step 6: Validate and Import
+
+1. Review the preview of tickets to be imported
+2. Verify that multi-line descriptions display correctly with proper formatting
+3. Click "Begin Import"
+4. Wait for the import to complete
+5. Review any error messages and fix issues if needed
+
+### CSV Import Best Practices
+
+1. **Test with Small Batches**: Import one team's CSV file first to verify the configuration works correctly
+2. **Save Configuration**: After successfully importing, save the configuration file for future imports
+3. **Check Descriptions**: After import, open a few tickets to verify that multi-line descriptions formatted correctly with Jira wiki markup
+4. **Verify Custom Fields**: Ensure Sprint Team, Epic Link, and Sprint fields populated correctly
+5. **One Team at a Time**: Import one team's CSV file at a time to make troubleshooting easier
+
+### Troubleshooting CSV Import
+
+**Problem**: Descriptions appear as single lines without formatting
+- **Cause**: Value mappings created for Description field
+- **Solution**: Delete value mappings for Description; ensure `config.value.mappings` is empty
+
+**Problem**: Custom fields not mapping correctly
+- **Cause**: Incorrect custom field IDs
+- **Solution**: Use `findCustomFields.py` to discover correct IDs for your Jira instance
+
+**Problem**: Import fails with validation errors
+- **Cause**: Project configuration requires additional fields
+- **Solution**: Check project's required fields and add them to CSV or modify project settings
+
+**Problem**: Epic Link not creating proper links
+- **Cause**: Epic Link custom field ID incorrect or epic doesn't exist
+- **Solution**: Verify epic exists and custom field ID is correct
+
+**Problem**: Sprint assignment not working
+- **Cause**: Sprint ID incorrect or sprint closed/completed
+- **Solution**: Verify sprint is active and use correct numeric Sprint ID
+
+### CSV vs API Creation
+
+**When to use CSV Export**:
+- Need to review all tickets before creating them
+- Want to import using Jira's built-in validation and error handling
+- Different projects have different custom field requirements
+- Need to batch imports by team or project
+- Jira API has rate limits or restrictions
+
+**When to use API Creation** (`-c` flag):
+- Want immediate ticket creation
+- Confident in configuration and field mappings
+- Processing single project with consistent settings
+- Need automated/scripted ticket creation
+
+Both methods create identical tickets; choose based on your workflow needs.
 
 ## Excel File Structure
 
@@ -684,6 +910,13 @@ python standardTicketCreator.py teams.xlsx -i Story -c
 - **Reporting**: Create follow-up scripts to analyze ticket creation patterns
 
 ## Version History
+
+### Version 2.1 (January 2026)
+- **CSV Export Feature**: Added `--csv` option to export tickets to CSV files for manual Jira import
+- **Team-Based File Generation**: Creates one CSV file per Sprint Team for easier import management
+- **Jira Wiki Markup**: Updated description formatting to use proper Jira wiki markup instead of Markdown
+- **Import Configuration**: Added `JiraImport-generic-configuration.txt` template for consistent CSV imports
+- **Documentation**: Added comprehensive CSV export and Jira import instructions
 
 ### Version 2.0 (October 2025) - Major Release
 - **BREAKING CHANGE**: Eliminated Excel category sheets (separate "Ownership", "Quality", "Security", "Reliability" sheets) - all scorecard data now comes from Backstage SoundCheck GraphQL API

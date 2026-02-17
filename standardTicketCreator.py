@@ -3053,14 +3053,14 @@ def process_team_category_from_backstage(args, team_name, category_name, categor
         
         # Create the ticket
         if args.create:
-            ticket = create_single_ticket(
+            ticket_info, skipped_key = create_single_ticket(
                 jira_client, project_key, issue_type, team_name, summary, description, 
                 additional_fields, args.create, excel_file=None, custom_fields_mapping=custom_fields_mapping
             )
-            if ticket:
-                created_tickets.append(ticket)
-                print(f"{Fore.GREEN}Created ticket: '{ticket.ticket_id} - {summary}' for key '{team_name}' in project {project_key} as issue type '{issue_type}'{Style.RESET_ALL}")
-            else:
+            if ticket_info:
+                created_tickets.append(ticket_info)
+                print(f"{Fore.GREEN}Created ticket: '{ticket_info.ticket_id} - {summary}' for key '{team_name}' in project {project_key} as issue type '{issue_type}'{Style.RESET_ALL}")
+            if skipped_key:
                 skipped_tickets.append(f"{team_name}_{category_name}")
         else:
             # Dry run mode
@@ -3158,6 +3158,16 @@ def display_overall_summary(create_mode, all_created_tickets, all_skipped_ticket
             print(f"{Fore.YELLOW}No tickets were created across all sheets{filter_info}.{Style.RESET_ALL}")
             
         display_skipped_tickets(all_skipped_tickets)
+        
+        # Show recommendation to use CSV export if there were failures during create mode
+        if all_skipped_tickets:
+            print(f"\n{Style.BRIGHT}{Fore.YELLOW}{'=' * 80}{Style.RESET_ALL}")
+            print(f"{Style.BRIGHT}{Fore.YELLOW}RECOMMENDATION: If you're experiencing issues with ticket creation,{Style.RESET_ALL}")
+            print(f"{Style.BRIGHT}{Fore.YELLOW}consider using the --csv option to export tickets to a CSV file instead,{Style.RESET_ALL}")
+            print(f"{Style.BRIGHT}{Fore.YELLOW}then import them directly into Jira. This can resolve many API-related issues.{Style.RESET_ALL}")
+            print(f"{Style.BRIGHT}{Fore.YELLOW}{'=' * 80}{Style.RESET_ALL}")
+            excel_filename = args.excel_file if args and hasattr(args, 'excel_file') else "teams.xlsx"
+            print(f"{Style.BRIGHT}{Fore.CYAN}Example: python standardTicketCreator.py {excel_filename} --csv output.csv{Style.RESET_ALL}\n")
 
 def export_tickets_to_csv(csv_file, tickets_data, custom_fields_mapping=None):
     """Export ticket data to CSV files, creating one file per Sprint Team.

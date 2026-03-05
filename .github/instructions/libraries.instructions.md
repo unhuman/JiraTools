@@ -8,16 +8,16 @@ applyTo: "libraries/**"
 Shared libraries in `libraries/` eliminate duplication across scripts.
 
 ## Modules
-- `jiraToolsConfig.py` — Config loading, Jira client creation, common JQL helpers.
+- `jiraToolsConfig.py` — Config loading (`~/.jiraTools` JSON), Jira client creation, Backstage URL resolution, common JQL helpers.
 - `excelTools.py` — Excel/CSV export utilities (openpyxl, pandas).
 - `backstageTools.py` — Backstage API integration and catalog queries.
 
 ## Import Pattern
 Scripts import from libraries as:
 ```python
-from libraries.jiraToolsConfig import load_config, get_jira_client
+from libraries.jiraToolsConfig import load_config, get_jira_client, get_backstage_url
 from libraries.excelTools import export_to_excel
-from libraries.backstageTools import get_backstage_entities
+from libraries.backstageTools import get_all_components, filter_components_for_team
 ```
 
 ## Principles
@@ -28,6 +28,5 @@ from libraries.backstageTools import get_backstage_entities
 - New shared functions go in the most relevant existing module; create a new module only if none fits.
 
 ## Config Files
-- Jira config: `~/.jiraTools` (INI format parsed by jiraToolsConfig).
-- Backstage config: `~/.backstage` (API base URL, token).
+- Jira config: `~/.jiraTools` (JSON format parsed by jiraToolsConfig). Keys: `jira_server`, `personal_access_token`, `backstageUrl`.
 - Datadog config: `~/.datadog` (API key, app key).

@@ -12,10 +12,10 @@ Usage:
 
 Examples:
     # Audit build.gradle files for a specific dependency version
-    python codeAudit.py teams.xlsx --checkFilename build.gradle --searchRegex 'spring-boot:(.+?)'
+    python codeAudit.py --teams TeamA --checkFilename build.gradle --searchRegex 'spring-boot:(.+?)'
 
     # Audit only specific teams, export to CSV
-    python codeAudit.py teams.xlsx --checkFilename Dockerfile --searchRegex 'FROM (.+)' --processTeams "TeamA,TeamB" --csv results.csv
+    python codeAudit.py --teams "TeamA,TeamB" --checkFilename Dockerfile --searchRegex 'FROM (.+)' -o results.csv
 
 Requirements:
     pip install colorama pandas openpyxl requests
@@ -63,8 +63,7 @@ def parse_arguments():
         help="Regex pattern with exactly one capture group to apply to each file"
     )
     parser.add_argument(
-        "--csv",
-        dest="csv_file",
+        "-o", "--output",
         metavar="FILE",
         help="Export results to a CSV file"
     )
@@ -536,19 +535,19 @@ def main():
     print(f"  Total matches: {total_matches}")
 
     # CSV export
-    if args.csv_file and results:
+    if args.output and results:
         num_groups = compiled_regex.groups
         group_texts = extract_capture_groups(args.searchRegex)
         if num_groups == 1:
             match_headers = [group_texts[0]] if group_texts else ["Match"]
         else:
             match_headers = group_texts if len(group_texts) == num_groups else [f"Match{i+1}" for i in range(num_groups)]
-        with open(args.csv_file, 'w', newline='') as f:
+        with open(args.output, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(["Team", "Repository"] + match_headers)
             writer.writerows(results)
-        print(f"\n{Fore.GREEN}Results exported to {args.csv_file}{Style.RESET_ALL}")
-    elif args.csv_file and not results:
+        print(f"\n{Fore.GREEN}Results exported to {args.output}{Style.RESET_ALL}")
+    elif args.output and not results:
         print(f"\n{Fore.YELLOW}No results to export to CSV.{Style.RESET_ALL}")
 
 

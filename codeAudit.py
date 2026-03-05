@@ -450,6 +450,7 @@ def main():
 
     # Process each team
     results = []
+    teams_not_found = []
     teams_processed = 0
     repos_checked = 0
     total_matches = 0
@@ -461,6 +462,7 @@ def main():
         team_components = filter_components_for_team(all_components, team_name)
         if not team_components:
             print(f"  No application components found for team {team_name}")
+            teams_not_found.append(team_name)
             continue
 
         component_names = [comp.get('metadata', {}).get('name', '') for comp in team_components]
@@ -533,6 +535,9 @@ def main():
     print(f"  Teams processed: {teams_processed}")
     print(f"  Repositories checked: {repos_checked}")
     print(f"  Total matches: {total_matches}")
+
+    if teams_not_found:
+        print(f"\n{Fore.RED}Error: Teams not found in Backstage: {', '.join(teams_not_found)}{Style.RESET_ALL}")
 
     # CSV export
     if args.output and results:

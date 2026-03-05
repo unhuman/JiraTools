@@ -458,10 +458,10 @@ def main():
     for team_name in sorted(teams):
         print(f"\n{Fore.CYAN}Processing team: {team_name}{Style.RESET_ALL}")
 
-        # Get application components owned by this team
-        team_components = filter_components_for_team(all_components, team_name)
+        # Get components owned by this team (applications and libraries)
+        team_components = filter_components_for_team(all_components, team_name, comp_type=None)
         if not team_components:
-            print(f"  No application components found for team {team_name}")
+            print(f"  No components found for team {team_name}")
             teams_not_found.append(team_name)
             continue
 

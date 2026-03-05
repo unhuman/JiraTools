@@ -11,7 +11,8 @@
 - Validate Python syntax with `python -m py_compile <file>` after edits.
 
 ## Code Changes
-- When there are code updates, ensure we: 1. Update documentation (README.md) 2. Update unit tests 3. Update spec files (.instructions.md)
+- When there are code updates, ensure we: 1. Update documentation (README.md and docs/<script>.md) 2. Update unit tests 3. Update spec files (.instructions.md)
+- Detailed per-script documentation lives in `docs/` — one file per script (e.g., `docs/codeAudit.md`). README.md has a summary table linking to each doc.
 - Imports from shared libraries use `from libraries.<module> import ...` (e.g., `from libraries.jiraToolsConfig import load_config`).
 - Never duplicate logic already in `libraries/` — import and reuse shared functions.
 

@@ -1,32 +1,31 @@
 # JiraTools
 Useful Stuff for working with Jira
 
-## Scripts:
-1. `epicPlanner.py`: Takes an epic and orders the work based on dependencies
-1. `epicStatus.py`: Reports on the status of an epic
-1. `epicCreationTime.py`: Reports on the time taken to create epics
-1. `findCustomFields.py`: Finds custom fields in a Jira instance
-1. `pointsToEstimate.py`: Converts story points to time estimates based on a configurable ratio
-1. `populateRemainingEstimate.py`: After `pointsToEstimate.py`, this will copy OriginalEstimate -> Remaining
-1. `subtasksUserDifferentParentOwner.py`: Finds user contributions on subtasks when parent tickets owned by someone else
-1. `standardTicketCreator.py`: Creates standard Jira tickets from an Excel file with team and category data
-1. `teamApplicationAttribution.py`: Queries Backstage for all teams and their owned applications (type=application only), outputs a JSON mapping
-1. `serviceConsumerAnalysis.py`: Analyzes service consumers using Datadog trace data - finds which services call your team's applications and generates reports aggregated by domain and system
-1. `codeAudit.py`: Audits code across team repositories - queries Backstage for team-owned components, fetches a specific file from each repo via sparse git checkout, and applies a regex to extract and report matched values. Usage: `python codeAudit.py --teams "Team-A,Team-B" --checkFilename build.gradle --searchRegex 'pattern'` (Backstage URL from `~/.jiraTools` `backstageUrl` key or `--backstageUrl` flag)
+## Scripts
 
-## Libraries (`libraries/`):
+| Script | Description | Docs |
+|--------|-------------|------|
+| `codeAudit.py` | Audits code across team repositories via Backstage + git sparse checkout + regex | [docs/codeAudit.md](docs/codeAudit.md) |
+| `epicPlanner.py` | Orders work in an epic based on ticket dependencies | [docs/epicPlanner.md](docs/epicPlanner.md) |
+| `epicStatus.py` | Reports on the plan status of an epic by sprint | [docs/epicStatus.md](docs/epicStatus.md) |
+| `epicCreationTime.py` | Analyzes development time spans of open epics | [docs/epicCreationTime.md](docs/epicCreationTime.md) |
+| `findCustomFields.py` | Discovers custom field IDs by examining a Jira issue | [docs/findCustomFields.md](docs/findCustomFields.md) |
+| `pointsToEstimate.py` | Converts story points to time estimates | [docs/pointsToEstimate.md](docs/pointsToEstimate.md) |
+| `populateRemainingEstimate.py` | Copies original estimate to remaining estimate | [docs/populateRemainingEstimate.md](docs/populateRemainingEstimate.md) |
+| `standardTicketCreator.py` | Creates standardized Jira tickets from Excel + Backstage scorecard data | [docs/standardTicketCreator.md](docs/standardTicketCreator.md) |
+| `serviceConsumerAnalysis.py` | Analyzes service consumers using Datadog trace data | [docs/serviceConsumerAnalysis.md](docs/serviceConsumerAnalysis.md) |
+| `subtasksUserDifferentParentOwner.py` | Finds subtasks where assignee differs from parent owner | [docs/subtasksUserDifferentParentOwner.md](docs/subtasksUserDifferentParentOwner.md) |
+| `teamApplicationAttribution.py` | Maps Backstage teams to their owned applications | [docs/teamApplicationAttribution.md](docs/teamApplicationAttribution.md) |
+
+## Libraries (`libraries/`)
 - `jiraToolsConfig.py`: Shared Jira configuration, connection setup, and utility functions (used by most scripts)
 - `excelTools.py`: Shared Excel reading utilities and team management functions
 - `backstageTools.py`: Shared Backstage API utilities for querying components and teams
 
-## Documentation:
-- [Standard Ticket Creator Documentation](standardTicketCreator_documentation.md)
-- [Service Consumer Analysis Documentation](serviceConsumerAnalysisDocumentation.md)
-
-## Setup: 
+## Setup
 `pip install colorama jira networkx pandas openpyxl requests`
 
-## Testing:
+## Testing
 ```bash
 pip install pytest
 python -m pytest tests/ -v

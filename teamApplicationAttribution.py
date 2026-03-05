@@ -29,6 +29,7 @@ import requests
 from collections import Counter
 from colorama import Fore, Style, init
 from typing import Dict, List, Set
+from libraries.backstageTools import matches_team_owner, get_all_teams, get_team_components
 
 
 def parse_arguments():
@@ -64,116 +65,7 @@ def parse_arguments():
     return args
 
 
-def get_all_teams(backstage_url: str, timeout: int = 30) -> List[Dict]:
-    """
-    Query Backstage catalog for all teams (groups).
-    
-    Args:
-        backstage_url: Base URL for Backstage instance
-        timeout: Request timeout in seconds
-        
-    Returns:
-        List of team entities
-    """
-    print(f"{Fore.CYAN}Querying Backstage for all teams...{Style.RESET_ALL}")
-    
-    # Query the catalog for all groups (teams)
-    catalog_url = f"{backstage_url}/api/catalog/entities"
-    params = {
-        "filter": "kind=group",
-    }
-    
-    try:
-        response = requests.get(catalog_url, params=params, timeout=timeout)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        # Handle both list and dict responses
-        if isinstance(data, list):
-            teams = data
-        elif isinstance(data, dict):
-            teams = data.get('items', [])
-        else:
-            teams = []
-        
-        print(f"{Fore.GREEN}Found {len(teams)} teams in Backstage{Style.RESET_ALL}")
-        return teams
-        
-    except requests.exceptions.RequestException as e:
-        print(f"{Fore.RED}Error querying Backstage catalog: {e}{Style.RESET_ALL}")
-        return []
-
-
-def matches_team_owner(owner: str, team_name: str) -> bool:
-    """Check if an owner string matches the team name in various formats (case-insensitive)."""
-    if not owner:
-        return False
-    owner_lower = owner.lower()
-    team_lower = team_name.lower()
-    return (owner_lower == f"group:default/{team_lower}" or 
-            owner_lower == f"group:{team_lower}" or 
-            owner_lower == team_lower or
-            owner_lower.endswith(f"/{team_lower}") or
-            owner_lower.endswith(f":{team_lower}"))
-
-
-def get_team_components(backstage_url: str, team_name: str, timeout: int = 30) -> List[Dict]:
-    """
-    Query Backstage for all application components owned by a specific team.
-    Note: The UI may show more components than API reports as owner.
-    The UI includes components where team is in relations, annotations, or other fields.
-    This function only includes components where spec.owner matches the team.
-    
-    Args:
-        backstage_url: Base URL for Backstage instance
-        team_name: Name of the team
-        timeout: Request timeout in seconds
-        
-    Returns:
-        List of application components owned by the team
-    """
-    catalog_url = f"{backstage_url}/api/catalog/entities"
-    
-    # Get all components and filter manually
-    # This is more reliable than using API filters which may not work correctly
-    try:
-        params = {
-            "filter": "kind=component",
-        }
-        
-        response = requests.get(catalog_url, params=params, timeout=timeout)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        # Handle both list and dict responses
-        if isinstance(data, list):
-            all_components = data
-        elif isinstance(data, dict):
-            all_components = data.get('items', [])
-        else:
-            all_components = []
-        
-        # Filter components by owner and type
-        # Only include components of type 'application' 
-        # Exclude: libraries, tests, cookbooks, repositories, infrastructure, tools, external-api-keys, etc.
-        team_components = []
-        
-        for comp in all_components:
-            owner = comp.get('spec', {}).get('owner', '')
-            comp_type = comp.get('spec', {}).get('type', 'NO_TYPE')
-            
-            if matches_team_owner(owner, team_name):
-                # Only include type='application'
-                if comp_type.lower() == 'application':
-                    team_components.append(comp)
-        
-        return team_components
-        
-    except requests.exceptions.RequestException as e:
-        print(f"{Fore.YELLOW}Warning: Error querying applications for team {team_name}: {e}{Style.RESET_ALL}")
-        return []
+# get_all_teams, matches_team_owner, and get_team_components are now imported from backstageTools
 
 
 def extract_component_info(component: Dict) -> Dict:

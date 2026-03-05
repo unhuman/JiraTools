@@ -6,119 +6,7 @@ import argparse
 from colorama import init, Fore, Back, Style
 from datetime import datetime
 import jira
-from jiraToolsConfig import load_config, statusIsDone
-
-# Parse arguments
-parser = argparse.ArgumentParser(description="Evaluate the current plan of an epic.")
-parser.add_argument("epic_key", help="The key of the epic")
-args = parser.parse_args()
-
-# JIRA setup
-config = load_config()
-
-jira_client = jira.JIRA(config["jira_server"], token_auth=(config["personal_access_token"]))
-
-# Get Epic and Issues
-epic_key = args.epic_key
-try:
-    epic = jira_client.issue(epic_key)
-except jira.exceptions.JIRAError as e:
-    print(f"Error retrieving epic: {e}")
-    exit(1)
-
-jql = f"\"Epic Link\"={epic_key}"
-try:
-    issues = jira_client.search_issues(jql, maxResults=False)
-except jira.exceptions.JIRAError as e:
-    print(f"Error searching issues: {e}")
-    exit(1)
-
-# Organize issues by sprint ID and status
-planned_issues = {}
-unplanned_issues = []
-completed_issues = {}
-
-for issue in issues:
-    sprint_ids = []
-    try:
-        sprint_field = getattr(issue.fields, 'customfield_10505', None)  # Using customfield_10505
-
-        if sprint_field:
-            if isinstance(sprint_field, list):  # Multi-select sprint field (list of objects/strings)
-                for sprint_data in sprint_field:
-                    if isinstance(sprint_data, str):  # Older format
-                        try:
-                            sprint_id_str = sprint_data.split("[id=")[1].split(",")[0]
-                            sprint_id = int(sprint_id_str)
-                            sprint_ids.append(sprint_id)
-                        except (IndexError, ValueError):
-                            print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_data}")
-                            unplanned_issues.append(issue)
-                            continue
-                    elif hasattr(sprint_data, 'id'):  # Newer format
-                        sprint_ids.append(sprint_data.id)
-                    else:
-                        print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_data}")
-                        unplanned_issues.append(issue)
-                        continue
-            elif isinstance(sprint_field, str):  # Single sprint field (string representation)
-                try:
-                    sprint_id_str = sprint_field.split("[id=")[1].split(",")[0]
-                    sprint_id = int(sprint_id_str)
-                    sprint_ids.append(sprint_id)
-                except (IndexError, ValueError):
-                    print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_field}")
-                    unplanned_issues.append(issue)
-                    continue
-            elif hasattr(sprint_field, 'id'):  # Single sprint field (object with ID)
-                sprint_ids.append(sprint_field.id)
-            else:
-                print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_field}")
-                unplanned_issues.append(issue)
-                continue
-
-        if not sprint_ids:  # Unplanned
-            unplanned_issues.append(issue)
-            continue  # Skip to the next issue
-
-        # Report only the LAST sprint
-        sprint_id = sprint_ids[-1]  # Get the last sprint ID
-        if sprint_id not in planned_issues:
-            planned_issues[sprint_id] = {}
-
-        status = issue.fields.status.name
-
-        if statusIsDone(status):
-            if sprint_id not in completed_issues:
-                completed_issues[sprint_id] = {}
-            if status not in completed_issues[sprint_id]:
-                completed_issues[sprint_id][status] = []
-            completed_issues[sprint_id][status].append(issue)
-        else:
-            if sprint_id not in planned_issues:
-                planned_issues[sprint_id] = {}
-            if status not in planned_issues[sprint_id]:
-                planned_issues[sprint_id][status] = []
-            planned_issues[sprint_id][status].append(issue)
-
-    except AttributeError:
-        unplanned_issues.append(issue)
-        print(f"Warning: Issue {issue.key} has no sprint assigned.")
-        continue
-
-# Fetch Sprint Names and Dates (Corrected Logic Here - Handling None Dates)
-sprint_data = {}
-all_sprint_ids = set(planned_issues.keys()).union(completed_issues.keys())  # Get all sprints
-for sprint_id in all_sprint_ids:  # Iterate through all sprint IDs
-    try:
-        sprint = jira_client.sprint(sprint_id)  # Get sprint object
-        start_date = getattr(sprint, 'startDate', None)  # Handle missing startDate attribute
-        end_date = getattr(sprint, 'endDate', None)      # Handle missing endDate attribute
-        sprint_data[sprint_id] = {"name": sprint.name, "startDate": start_date, "endDate": end_date}
-    except jira.exceptions.JIRAError as e:
-        print(f"Error getting sprint data for ID {sprint_id}: {e}")
-        sprint_data[sprint_id] = {"name": f"Sprint ID {sprint_id} (Data Unavailable)", "startDate": None, "endDate": None}
-
+from libraries.jiraToolsConfig import load_config, statusIsDone
 
 def sprint_sort_key(item):  # Custom sort function (Handles None Dates)
     sprint_id = item[0]
@@ -174,19 +62,131 @@ def filter_and_print_sprints(title, issues_dict, sprint_data):
                 color = getTicketColor(status)
                 print(f"    {color}{issue.key}: {issue.fields.summary}{Style.RESET_ALL}")
 
-# Print the report (Corrected Printing Logic - Including Dates)
-print(f"{Style.BRIGHT}Epic Plan Evaluation: {epic_key}{Style.RESET_ALL}")
+if __name__ == '__main__':
+    # Parse arguments
+    parser = argparse.ArgumentParser(description="Evaluate the current plan of an epic.")
+    parser.add_argument("epic_key", help="The key of the epic")
+    args = parser.parse_args()
 
-# Print unplanned but withdrawn issues
-unplanned_finished_issues = [issue for issue in unplanned_issues if issue.fields.status.name.lower() == "withdrawn" or statusIsDone(issue.fields.status.name)]
-simple_print_tickets("Completed (Withdrawn or Done no sprint) Work", unplanned_finished_issues)
+    # JIRA setup
+    config = load_config()
 
-# Print Completed Work (Sorted, with Dates, Excluding Empty Sprints)
-filter_and_print_sprints("Completed Work", completed_issues, sprint_data)
+    jira_client = jira.JIRA(config["jira_server"], token_auth=(config["personal_access_token"]))
 
-# Print Planned Work (Sorted, with Dates, Excluding Empty Sprints)
-filter_and_print_sprints("Planned Work", planned_issues, sprint_data)
+    # Get Epic and Issues
+    epic_key = args.epic_key
+    try:
+        epic = jira_client.issue(epic_key)
+    except jira.exceptions.JIRAError as e:
+        print(f"Error retrieving epic: {e}")
+        exit(1)
 
-# Print Unplanned Work (but exclude withdrawn issues)
-unplanned_open_issues = [issue for issue in unplanned_issues if issue.fields.status.name.lower() != "withdrawn" and not statusIsDone(issue.fields.status.name)]
-simple_print_tickets("Unplanned Work", unplanned_open_issues)
+    jql = f"\"Epic Link\"={epic_key}"
+    try:
+        issues = jira_client.search_issues(jql, maxResults=False)
+    except jira.exceptions.JIRAError as e:
+        print(f"Error searching issues: {e}")
+        exit(1)
+
+    # Organize issues by sprint ID and status
+    planned_issues = {}
+    unplanned_issues = []
+    completed_issues = {}
+
+    for issue in issues:
+        sprint_ids = []
+        try:
+            sprint_field = getattr(issue.fields, 'customfield_10505', None)  # Using customfield_10505
+
+            if sprint_field:
+                if isinstance(sprint_field, list):  # Multi-select sprint field (list of objects/strings)
+                    for sprint_data_item in sprint_field:
+                        if isinstance(sprint_data_item, str):  # Older format
+                            try:
+                                sprint_id_str = sprint_data_item.split("[id=")[1].split(",")[0]
+                                sprint_id = int(sprint_id_str)
+                                sprint_ids.append(sprint_id)
+                            except (IndexError, ValueError):
+                                print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_data_item}")
+                                unplanned_issues.append(issue)
+                                continue
+                        elif hasattr(sprint_data_item, 'id'):  # Newer format
+                            sprint_ids.append(sprint_data_item.id)
+                        else:
+                            print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_data_item}")
+                            unplanned_issues.append(issue)
+                            continue
+                elif isinstance(sprint_field, str):  # Single sprint field (string representation)
+                    try:
+                        sprint_id_str = sprint_field.split("[id=")[1].split(",")[0]
+                        sprint_id = int(sprint_id_str)
+                        sprint_ids.append(sprint_id)
+                    except (IndexError, ValueError):
+                        print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_field}")
+                        unplanned_issues.append(issue)
+                        continue
+                elif hasattr(sprint_field, 'id'):  # Single sprint field (object with ID)
+                    sprint_ids.append(sprint_field.id)
+                else:
+                    print(f"Warning: Issue {issue.key} has invalid sprint data: {sprint_field}")
+                    unplanned_issues.append(issue)
+                    continue
+
+            if not sprint_ids:  # Unplanned
+                unplanned_issues.append(issue)
+                continue  # Skip to the next issue
+
+            # Report only the LAST sprint
+            sprint_id = sprint_ids[-1]  # Get the last sprint ID
+            if sprint_id not in planned_issues:
+                planned_issues[sprint_id] = {}
+
+            status = issue.fields.status.name
+
+            if statusIsDone(status):
+                if sprint_id not in completed_issues:
+                    completed_issues[sprint_id] = {}
+                if status not in completed_issues[sprint_id]:
+                    completed_issues[sprint_id][status] = []
+                completed_issues[sprint_id][status].append(issue)
+            else:
+                if sprint_id not in planned_issues:
+                    planned_issues[sprint_id] = {}
+                if status not in planned_issues[sprint_id]:
+                    planned_issues[sprint_id][status] = []
+                planned_issues[sprint_id][status].append(issue)
+
+        except AttributeError:
+            unplanned_issues.append(issue)
+            print(f"Warning: Issue {issue.key} has no sprint assigned.")
+            continue
+
+    # Fetch Sprint Names and Dates (Corrected Logic Here - Handling None Dates)
+    sprint_data = {}
+    all_sprint_ids = set(planned_issues.keys()).union(completed_issues.keys())  # Get all sprints
+    for sprint_id in all_sprint_ids:  # Iterate through all sprint IDs
+        try:
+            sprint = jira_client.sprint(sprint_id)  # Get sprint object
+            start_date = getattr(sprint, 'startDate', None)  # Handle missing startDate attribute
+            end_date = getattr(sprint, 'endDate', None)      # Handle missing endDate attribute
+            sprint_data[sprint_id] = {"name": sprint.name, "startDate": start_date, "endDate": end_date}
+        except jira.exceptions.JIRAError as e:
+            print(f"Error getting sprint data for ID {sprint_id}: {e}")
+            sprint_data[sprint_id] = {"name": f"Sprint ID {sprint_id} (Data Unavailable)", "startDate": None, "endDate": None}
+
+    # Print the report (Corrected Printing Logic - Including Dates)
+    print(f"{Style.BRIGHT}Epic Plan Evaluation: {epic_key}{Style.RESET_ALL}")
+
+    # Print unplanned but withdrawn issues
+    unplanned_finished_issues = [issue for issue in unplanned_issues if issue.fields.status.name.lower() == "withdrawn" or statusIsDone(issue.fields.status.name)]
+    simple_print_tickets("Completed (Withdrawn or Done no sprint) Work", unplanned_finished_issues)
+
+    # Print Completed Work (Sorted, with Dates, Excluding Empty Sprints)
+    filter_and_print_sprints("Completed Work", completed_issues, sprint_data)
+
+    # Print Planned Work (Sorted, with Dates, Excluding Empty Sprints)
+    filter_and_print_sprints("Planned Work", planned_issues, sprint_data)
+
+    # Print Unplanned Work (but exclude withdrawn issues)
+    unplanned_open_issues = [issue for issue in unplanned_issues if issue.fields.status.name.lower() != "withdrawn" and not statusIsDone(issue.fields.status.name)]
+    simple_print_tickets("Unplanned Work", unplanned_open_issues)

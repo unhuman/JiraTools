@@ -3,7 +3,7 @@
 import argparse
 from datetime import datetime, timedelta
 import jira
-from jiraToolsConfig import load_config, statusIsDone # Import your configuration and utility functions
+from libraries.jiraToolsConfig import load_config, statusIsDone # Import your configuration and utility functions
 import sys
 import re # For parsing sprint data if it's a string
 

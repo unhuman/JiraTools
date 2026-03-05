@@ -10,7 +10,7 @@ Usage:
 import argparse
 from datetime import datetime
 from jira import JIRA
-from jiraToolsConfig import load_config, statusIsDone # This config needs to be updated
+from libraries.jiraToolsConfig import load_config, statusIsDone # This config needs to be updated
 
 def main():
     """

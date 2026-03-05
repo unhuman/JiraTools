@@ -3,7 +3,7 @@
 import argparse
 from colorama import init, Fore, Style
 import jira
-from jiraToolsConfig import load_config
+from libraries.jiraToolsConfig import load_config
 
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description="Find custom field IDs in JIRA by examining an issue.")

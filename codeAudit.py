@@ -37,6 +37,11 @@ from colorama import init, Fore, Style
 
 from libraries.jiraToolsConfig import load_config, get_backstage_url
 from libraries.backstageTools import get_all_components, get_all_teams, filter_components_for_team
+from libraries.excelTools import process_teams_sheet, get_excel_sheets
+from libraries.jiraTicketTools import (
+    ASSIGNEE_FIELD, EPIC_LINK_FIELD,
+    create_jira_ticket, link_to_epic,
+)
 
 
 def parse_arguments():
@@ -80,6 +85,20 @@ def parse_arguments():
     parser.add_argument(
         "--dateTolerance",
         help="Max age for compliance (e.g., 2d=2 days, 3m=3 months, 1y=1 year). Requires --compare-repo"
+    )
+    parser.add_argument(
+        "--createTickets",
+        metavar="EXCEL_FILE",
+        help="Excel file with Teams sheet for Jira ticket creation (requires --compare-repo, --dateTolerance, --dependencyName)"
+    )
+    parser.add_argument(
+        "--dependencyName",
+        help="Dependency name for ticket summaries (e.g., 'Spring Boot'). Requires --createTickets"
+    )
+    parser.add_argument(
+        "-c", "--create",
+        action="store_true",
+        help="Actually create tickets in Jira (default is dry-run mode)"
     )
 
     return parser.parse_args()
@@ -561,6 +580,142 @@ def extract_capture_groups(regex_str):
     return groups
 
 
+def _create_compliance_tickets(args, config, results, version_dates):
+    """Create Jira tickets for out-of-compliance results.
+
+    Reads team configuration from the Excel Teams sheet, then creates one
+    ticket per out-of-compliance repo using the shared jiraTicketTools library.
+    Dry-run by default; use -c/--create to actually create tickets.
+    """
+    import jira as jira_mod
+
+    excel_file = args.createTickets
+    dependency_name = args.dependencyName
+    create_mode = args.create
+
+    # Determine latest available version from compare-repo tags
+    latest_version = None
+    latest_date = None
+    if version_dates:
+        # version_dates is ordered by -creatordate; first entry is newest
+        latest_version = next(iter(version_dates))
+        latest_date = version_dates[latest_version]
+
+    # Load team mapping from Excel Teams sheet
+    try:
+        available_sheets = get_excel_sheets(excel_file)
+        team_mapping = process_teams_sheet(excel_file, available_sheets)
+    except Exception as e:
+        print(f"{Fore.RED}Error reading Excel file '{excel_file}': {e}{Style.RESET_ALL}")
+        return
+
+    if not team_mapping:
+        print(f"{Fore.RED}Error: No team configuration found in Teams sheet of '{excel_file}'{Style.RESET_ALL}")
+        return
+
+    # Connect to Jira if in create mode
+    jira_client = None
+    if create_mode:
+        try:
+            jira_client = jira_mod.JIRA(
+                config["jira_server"],
+                token_auth=config["personal_access_token"],
+            )
+        except Exception as e:
+            print(f"{Fore.RED}Error connecting to Jira: {e}{Style.RESET_ALL}")
+            return
+    else:
+        print(f"\n{Fore.CYAN}Running in DRY-RUN mode — use -c/--create to actually create tickets{Style.RESET_ALL}")
+
+    # Build tickets: one per out-of-compliance repo
+    print(f"\n{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Ticket Creation ({len(results)} out-of-compliance result(s)):{Style.RESET_ALL}")
+
+    created = 0
+    skipped_no_mapping = []
+    failed = []
+    simulated_counter = 0
+
+    for row in results:
+        team_name = row[0]
+        repo_display = row[1]
+        # Capture groups are between team/repo and last_updated/age
+        current_version = ", ".join(row[2:-2])
+        last_updated = row[-2]
+        age_days = row[-1]
+
+        # Look up team in Excel mapping
+        if team_name not in team_mapping:
+            if team_name not in skipped_no_mapping:
+                skipped_no_mapping.append(team_name)
+                print(f"{Fore.YELLOW}Skipping team '{team_name}' — not found in Teams sheet{Style.RESET_ALL}")
+            continue
+
+        team_config = team_mapping[team_name]
+        project_key = team_config.get("Project")
+        if not project_key:
+            print(f"{Fore.YELLOW}Skipping team '{team_name}' — no Project field in Teams sheet{Style.RESET_ALL}")
+            continue
+
+        issue_type = team_config.get("Issue Type", "Task")
+        epic_link = team_config.get(EPIC_LINK_FIELD)
+        assignee = team_config.get(ASSIGNEE_FIELD)
+
+        summary = f"Update {repo_display} {dependency_name} from {current_version} to latest version"
+
+        desc_lines = [
+            f"*Repository:* {repo_display}",
+            f"*Current Version:* {current_version}",
+            f"*Current Version Date:* {last_updated}",
+            f"*Current Version Age:* {age_days} days",
+        ]
+        if latest_version:
+            desc_lines.append(f"*Latest Available Version:* {latest_version}")
+        if latest_date:
+            desc_lines.append(f"*Latest Available Date:* {latest_date}")
+        desc_lines.append("")
+        desc_lines.append("_Note: Please verify the latest version at the time of work._")
+        description = "\n".join(desc_lines)
+
+        additional_fields = {}
+        if epic_link and str(epic_link) != 'nan':
+            additional_fields[EPIC_LINK_FIELD] = epic_link
+        if assignee and str(assignee) != 'nan':
+            additional_fields[ASSIGNEE_FIELD] = assignee
+
+        if create_mode:
+            try:
+                new_issue = create_jira_ticket(
+                    jira_client, project_key, issue_type, summary, description,
+                    excel_file=excel_file, **additional_fields,
+                )
+                if new_issue:
+                    created += 1
+                    print(f"{Fore.GREEN}Created {new_issue.key}: {summary}{Style.RESET_ALL}")
+                else:
+                    failed.append(repo_display)
+            except Exception as e:
+                print(f"{Fore.RED}Failed to create ticket for {repo_display}: {e}{Style.RESET_ALL}")
+                failed.append(repo_display)
+        else:
+            simulated_counter += 1
+            print(f"  {Fore.BLUE}[DRY RUN] (simulated-{project_key}-{simulated_counter}) "
+                  f"{summary}{Style.RESET_ALL}")
+            if description:
+                for line in description.splitlines():
+                    print(f"    {Fore.BLUE}{line}{Style.RESET_ALL}")
+            created += 1
+
+    # Ticket creation summary
+    print(f"\n{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
+    mode_label = "Created" if create_mode else "Would create"
+    print(f"{Fore.CYAN}Ticket Summary: {mode_label} {created} ticket(s){Style.RESET_ALL}")
+    if skipped_no_mapping:
+        print(f"{Fore.YELLOW}Teams not in Excel mapping (skipped): {', '.join(skipped_no_mapping)}{Style.RESET_ALL}")
+    if failed:
+        print(f"{Fore.RED}Failed: {', '.join(failed)}{Style.RESET_ALL}")
+
+
 def main():
     init()
 
@@ -571,6 +726,22 @@ def main():
     date_tolerance_str = args.dateTolerance
     if bool(compare_repo) != bool(date_tolerance_str):
         print(f"{Fore.RED}Error: --compare-repo and --dateTolerance must be used together.{Style.RESET_ALL}")
+        sys.exit(1)
+
+    # Validate --createTickets requires --compare-repo, --dateTolerance, and --dependencyName
+    if args.createTickets:
+        missing = []
+        if not compare_repo:
+            missing.append("--compare-repo")
+        if not date_tolerance_str:
+            missing.append("--dateTolerance")
+        if not args.dependencyName:
+            missing.append("--dependencyName")
+        if missing:
+            print(f"{Fore.RED}Error: --createTickets requires {', '.join(missing)}.{Style.RESET_ALL}")
+            sys.exit(1)
+    if args.dependencyName and not args.createTickets:
+        print(f"{Fore.RED}Error: --dependencyName requires --createTickets.{Style.RESET_ALL}")
         sys.exit(1)
 
     # Parse date tolerance if provided
@@ -799,6 +970,10 @@ def main():
         print(f"\n{Fore.GREEN}Results exported to {args.output}{Style.RESET_ALL}")
     elif args.output and not results:
         print(f"\n{Fore.YELLOW}No results to export to CSV.{Style.RESET_ALL}")
+
+    # Ticket creation
+    if args.createTickets and results:
+        _create_compliance_tickets(args, config, results, version_dates)
 
 
 if __name__ == "__main__":

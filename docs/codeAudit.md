@@ -27,6 +27,9 @@ python codeAudit.py --teams <TEAMS> --checkFilename <FILE> --searchRegex <REGEX>
 | `-v, --verbose` | Show detailed git operation logging |
 | `--compare-repo` | Git repo URL to fetch tags from for version date comparison (requires `--dateTolerance`) |
 | `--dateTolerance` | Max age for compliance, e.g., `2d` (days), `3m` (months), `1y` (years). Requires `--compare-repo` |
+| `--createTickets` | Excel file with Teams sheet for Jira ticket creation (requires `--compare-repo`, `--dateTolerance`, `--dependencyName`) |
+| `--dependencyName` | Dependency name for ticket summaries (e.g., `Spring Boot`). Requires `--createTickets` |
+| `-c, --create` | Actually create tickets in Jira (default is dry-run mode) |
 
 ## Configuration
 
@@ -69,6 +72,18 @@ python codeAudit.py --teams MyTeam --checkFilename build.gradle \
   --searchRegex 'com.example:core:(.+?)' \
   --compare-repo https://github.com/org/core.git --dateTolerance 1y \
   -o /tmp/compliance.csv -v
+
+# Dry-run ticket creation for out-of-compliance repos
+python codeAudit.py --teams all --checkFilename build.gradle \
+  --searchRegex 'spring-boot:(.+?)' \
+  --compare-repo git@github.com:spring-projects/spring-boot.git --dateTolerance 6m \
+  --createTickets teams.xlsx --dependencyName "Spring Boot"
+
+# Actually create tickets in Jira
+python codeAudit.py --teams "TeamA,TeamB" --checkFilename pom.xml \
+  --searchRegex '<version>(.*?)</version>' \
+  --compare-repo git@github.com:org/shared-library.git --dateTolerance 1y \
+  --createTickets teams.xlsx --dependencyName "Shared Library" -c
 ```
 
 ## Workflow
@@ -87,6 +102,7 @@ python codeAudit.py --teams MyTeam --checkFilename build.gradle \
 8. Display results with colored output (including "Last Updated" column when compliance checking)
 9. Optionally export to CSV with auto-generated column headers from capture groups (plus "Last Updated" when applicable)
 10. Report any teams not found in Backstage as errors
+11. If `--createTickets` is provided, create Jira tickets for out-of-compliance repos using team configuration from the Excel file
 
 ## Output
 
@@ -111,3 +127,44 @@ When `--compare-repo` and `--dateTolerance` are provided together:
 
 - `git` must be available on PATH (used for sparse checkout)
 - Backstage API accessible at the configured URL
+
+## Automatic Ticket Creation
+
+When `--createTickets <excel_file>` is provided along with `--compare-repo`, `--dateTolerance`, and `--dependencyName`, the script can create Jira tickets for out-of-compliance repos.
+
+### How It Works
+
+1. After compliance filtering, the script loads team configuration from the Excel file's Teams sheet (same format as `standardTicketCreator.py`)
+2. For each out-of-compliance result, it looks up the team in the Teams sheet to get the Jira project key, issue type, epic link, and assignee
+3. One ticket is created per out-of-compliance repo
+4. Runs in dry-run mode by default — use `-c`/`--create` to actually create tickets
+
+### Ticket Format
+
+- **Summary**: `Update {repo} {dependencyName} from {version} to latest version`
+- **Description**: Contains repository name, current version/date/age, latest available version/date, and a note to verify at the time of work
+
+### Excel Teams Sheet
+
+The Excel file must have a Teams sheet with Key/Field/Value columns (same format used by `standardTicketCreator.py`):
+
+| Key | Field | Value |
+|-----|-------|-------|
+| TeamA | Project | PROJ |
+| TeamA | Epic Link | EPIC-123 |
+| TeamA | Assignee | john.doe |
+| TeamA | Issue Type | Task |
+
+Teams not found in the mapping are skipped with a warning.
+
+### Configuration
+
+Jira connection uses the same `~/.jiraTools` config:
+
+```json
+{
+  "jira_server": "https://jira.example.com",
+  "personal_access_token": "your_token",
+  "backstageUrl": "https://backstage.example.com"
+}
+```

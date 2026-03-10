@@ -11,6 +11,7 @@ Shared libraries in `libraries/` eliminate duplication across scripts.
 - `jiraToolsConfig.py` — Config loading (`~/.jiraTools` JSON), Jira client creation, Backstage URL resolution, common JQL helpers.
 - `excelTools.py` — Excel/CSV export utilities (openpyxl, pandas).
 - `backstageTools.py` — Backstage API integration and catalog queries.
+- `jiraTicketTools.py` — Shared Jira ticket creation utilities (issue dict preparation, field formatting, epic linking, error handling).
 
 ## Import Pattern
 Scripts import from libraries as:

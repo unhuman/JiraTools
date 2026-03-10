@@ -11,7 +11,7 @@ from codeAudit import (
     validate_regex, extract_repo_name, normalize_git_url_to_ssh,
     build_match_display, extract_capture_groups,
     parse_date_tolerance, extract_semver, fetch_repo_tags,
-    _is_permission_error
+    _is_permission_error, _create_compliance_tickets
 )
 
 
@@ -291,3 +291,55 @@ class TestIsPermissionError:
     def test_other_error_is_not_permission_error(self):
         result = MagicMock(returncode=128, stderr="fatal: repository not found")
         assert _is_permission_error(result) is False
+
+
+class TestCreateComplianceTickets:
+    """Tests for _create_compliance_tickets dry-run and argument handling."""
+
+    def _make_args(self, create=False, excel="teams.xlsx", dep_name="Spring Boot"):
+        args = MagicMock()
+        args.createTickets = excel
+        args.dependencyName = dep_name
+        args.create = create
+        return args
+
+    @patch('codeAudit.get_excel_sheets', return_value=["Teams"])
+    @patch('codeAudit.process_teams_sheet', return_value={
+        "TeamA": {"Project": "PROJ", "Issue Type": "Task", "Epic Link": "EPIC-1", "Assignee": "john"},
+    })
+    def test_dry_run_creates_no_real_tickets(self, mock_teams, mock_sheets):
+        args = self._make_args(create=False)
+        config = {"jira_server": "https://jira.example.com", "personal_access_token": "tok"}
+        results = [("TeamA", "org/repo", "1.0.0", "2024-01-01", "500")]
+        version_dates = {"2.0.0": "2025-06-01", "1.0.0": "2024-01-01"}
+
+        # Should not raise; dry-run mode prints but doesn't connect to Jira
+        _create_compliance_tickets(args, config, results, version_dates)
+
+    @patch('codeAudit.get_excel_sheets', return_value=["Teams"])
+    @patch('codeAudit.process_teams_sheet', return_value={})
+    def test_empty_team_mapping_returns_early(self, mock_teams, mock_sheets):
+        args = self._make_args()
+        config = {}
+        results = [("TeamA", "org/repo", "1.0.0", "2024-01-01", "500")]
+        # Should not raise with empty mapping
+        _create_compliance_tickets(args, config, results, {})
+
+    @patch('codeAudit.get_excel_sheets', return_value=["Teams"])
+    @patch('codeAudit.process_teams_sheet', return_value={
+        "TeamA": {"Project": "PROJ"},
+    })
+    def test_skips_team_not_in_mapping(self, mock_teams, mock_sheets):
+        args = self._make_args()
+        config = {}
+        results = [("UnknownTeam", "org/repo", "1.0.0", "2024-01-01", "500")]
+        # Should not raise; just skips
+        _create_compliance_tickets(args, config, results, {})
+
+    @patch('codeAudit.get_excel_sheets', side_effect=Exception("file not found"))
+    def test_excel_read_error_handled(self, mock_sheets):
+        args = self._make_args()
+        config = {}
+        results = [("TeamA", "org/repo", "1.0.0", "2024-01-01", "500")]
+        # Should not raise
+        _create_compliance_tickets(args, config, results, {})

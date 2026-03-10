@@ -24,6 +24,7 @@ Requirements:
 
 import argparse
 import csv
+from datetime import datetime, timedelta
 import os
 import re
 import shutil
@@ -72,6 +73,14 @@ def parse_arguments():
         action="store_true",
         help="Show detailed git operation logging for debugging"
     )
+    parser.add_argument(
+        "--compare-repo",
+        help="Git repo URL to fetch tags from for version date comparison"
+    )
+    parser.add_argument(
+        "--dateTolerance",
+        help="Max age for compliance (e.g., 2d=2 days, 3m=3 months, 1y=1 year). Requires --compare-repo"
+    )
 
     return parser.parse_args()
 
@@ -98,6 +107,119 @@ def validate_regex(pattern_str):
         return None
 
     return compiled
+
+
+def parse_date_tolerance(tolerance_str):
+    """Parse a date tolerance string into a timedelta.
+
+    Supported formats: Nd (days), Nm (months, approx 30 days), Ny (years, approx 365 days).
+
+    Args:
+        tolerance_str: String like '2d', '3m', '1y'
+
+    Returns:
+        timedelta, or None if invalid
+    """
+    match = re.match(r'^(\d+)([dmy])$', tolerance_str)
+    if not match:
+        print(f"{Fore.RED}Error: Invalid dateTolerance '{tolerance_str}'. "
+              f"Use format like 2d, 3m, 1y.{Style.RESET_ALL}")
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if unit == 'd':
+        return timedelta(days=amount)
+    elif unit == 'm':
+        return timedelta(days=amount * 30)
+    else:  # 'y'
+        return timedelta(days=amount * 365)
+
+
+def extract_semver(tag_name):
+    """Extract a semantic version (Major.Minor.Patch) from a tag name.
+
+    Ignores any prefix or suffix text around the version number.
+
+    Args:
+        tag_name: Tag string (e.g., 'v1.2.3', 'release-1.2.3-rc1')
+
+    Returns:
+        Version string like '1.2.3', or None if no semver found
+    """
+    match = re.search(r'(\d+\.\d+\.\d+)', tag_name)
+    return match.group(1) if match else None
+
+
+def fetch_repo_tags(repo_url, verbose=False):
+    """Fetch all tags and their creation dates from a git repository.
+
+    Uses a temporary directory to init a repo, fetch tags, and parse
+    the output of git for-each-ref.
+
+    Args:
+        repo_url: Git clone URL (SSH or HTTPS)
+        verbose: If True, log git commands and output
+
+    Returns:
+        Dict mapping semantic version string to date string (e.g., {'1.2.3': '2025-06-15'})
+    """
+    repo_url = normalize_git_url_to_ssh(repo_url)
+    temp_dir = tempfile.mkdtemp(prefix="codeAudit_tags_")
+    if verbose:
+        print(f"\n  {Fore.MAGENTA}[git] tag temp dir: {temp_dir}{Style.RESET_ALL}")
+
+    try:
+        result = _run_git(["git", "init"], temp_dir, 30, verbose, "init")
+        if result.returncode != 0:
+            return {}
+
+        result = _run_git(
+            ["git", "fetch", "--tags", repo_url],
+            temp_dir, 120, verbose, "fetch --tags"
+        )
+        if result.returncode != 0:
+            if _is_permission_error(result):
+                print(f"{Fore.YELLOW}Warning: Permission denied fetching tags from {repo_url}{Style.RESET_ALL}")
+            return {}
+
+        result = _run_git(
+            ["git", "for-each-ref", "--sort=-creatordate",
+             "--format", "%(refname:short) %(creatordate:short)", "refs/tags"],
+            temp_dir, 30, verbose, "for-each-ref tags"
+        )
+        if result.returncode != 0:
+            return {}
+
+        version_dates = {}
+        for line in result.stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            # Format: "tag_name YYYY-MM-DD"
+            parts = line.rsplit(' ', 1)
+            if len(parts) != 2:
+                continue
+            tag_name, date_str = parts
+            version = extract_semver(tag_name)
+            if version and version not in version_dates:
+                version_dates[version] = date_str
+
+        if verbose:
+            print(f"  {Fore.MAGENTA}[git] Found {len(version_dates)} semver tag(s){Style.RESET_ALL}")
+            for ver, date in list(version_dates.items())[:10]:
+                print(f"    {ver} -> {date}")
+            if len(version_dates) > 10:
+                print(f"    ... and {len(version_dates) - 10} more")
+
+        return version_dates
+
+    except subprocess.TimeoutExpired:
+        print(f"{Fore.YELLOW}Warning: Git operation timed out fetching tags from {repo_url}{Style.RESET_ALL}")
+        return {}
+    except Exception as e:
+        print(f"{Fore.YELLOW}Warning: Error fetching tags from {repo_url}: {e}{Style.RESET_ALL}")
+        return {}
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def get_component_repo_url(backstage_url, component_name, timeout=30):
@@ -181,12 +303,17 @@ def normalize_git_url_to_ssh(git_url):
 def _run_git(cmd, cwd, timeout, verbose, step_label):
     """Run a git command, optionally logging details.
     
+    Sets GIT_TERMINAL_PROMPT=0 to prevent interactive password prompts.
+    
     Returns:
         subprocess.CompletedProcess result
     """
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
     if verbose:
         print(f"\n      {Fore.MAGENTA}[git] {step_label}: {' '.join(cmd)}{Style.RESET_ALL}")
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
     if verbose:
         if result.stdout.strip():
             for line in result.stdout.strip().splitlines():
@@ -197,6 +324,22 @@ def _run_git(cmd, cwd, timeout, verbose, step_label):
         if result.returncode != 0:
             print(f"        {Fore.RED}exit code: {result.returncode}{Style.RESET_ALL}")
     return result
+
+
+def _is_permission_error(result):
+    """Check if a git command result indicates a permission/authentication error."""
+    if result.returncode == 0:
+        return False
+    stderr = result.stderr.lower()
+    permission_indicators = [
+        "permission denied",
+        "could not read from remote",
+        "authentication failed",
+        "host key verification failed",
+        "fatal: could not read username",
+        "terminal prompts disabled",
+    ]
+    return any(indicator in stderr for indicator in permission_indicators)
 
 
 def fetch_file_from_repo(git_url, file_path, verbose=False):
@@ -254,6 +397,8 @@ def fetch_file_from_repo(git_url, file_path, verbose=False):
             temp_dir, 60, verbose, "pull origin HEAD"
         )
         if result.returncode != 0:
+            if _is_permission_error(result):
+                return "PERMISSION_DENIED"
             return None
 
         # Check what files exist
@@ -421,6 +566,20 @@ def main():
 
     args = parse_arguments()
 
+    # Validate --compare-repo and --dateTolerance are used together
+    compare_repo = getattr(args, 'compare_repo', None)
+    date_tolerance_str = args.dateTolerance
+    if bool(compare_repo) != bool(date_tolerance_str):
+        print(f"{Fore.RED}Error: --compare-repo and --dateTolerance must be used together.{Style.RESET_ALL}")
+        sys.exit(1)
+
+    # Parse date tolerance if provided
+    tolerance = None
+    if date_tolerance_str:
+        tolerance = parse_date_tolerance(date_tolerance_str)
+        if tolerance is None:
+            sys.exit(1)
+
     # Validate the regex
     compiled_regex = validate_regex(args.searchRegex)
     if compiled_regex is None:
@@ -433,6 +592,16 @@ def main():
         print(f"{Fore.RED}Error: No Backstage URL configured.{Style.RESET_ALL}")
         print(f"{Fore.RED}Set 'backstageUrl' in ~/.jiraTools or pass --backstageUrl.{Style.RESET_ALL}")
         sys.exit(1)
+
+    # Fetch compare-repo tags if requested
+    version_dates = {}
+    if compare_repo:
+        print(f"\n{Fore.CYAN}Fetching tags from compare repo: {compare_repo}{Style.RESET_ALL}")
+        version_dates = fetch_repo_tags(compare_repo, verbose=args.verbose)
+        if not version_dates:
+            print(f"{Fore.YELLOW}Warning: No semantic version tags found in compare repo.{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.GREEN}Found {len(version_dates)} semantic version tag(s) in compare repo{Style.RESET_ALL}")
 
     # Parse team names from CLI
     teams = [t.strip() for t in args.teams.split(",") if t.strip()]
@@ -451,11 +620,15 @@ def main():
     # Process each team
     results = []
     teams_not_found = []
+    repos_permission_denied = []
     teams_processed = 0
     repos_checked = 0
     total_matches = 0
 
-    for team_name in sorted(teams):
+    sorted_teams = sorted(teams)
+    total_teams = len(sorted_teams)
+
+    for team_idx, team_name in enumerate(sorted_teams, 1):
         print(f"\n{Fore.CYAN}Processing team: {team_name}{Style.RESET_ALL}")
 
         # Get components owned by this team (applications and libraries)
@@ -491,12 +664,18 @@ def main():
         teams_processed += 1
 
         # Fetch and analyze files from each repo
-        for git_url, (repo_display, comp_names) in repos.items():
+        total_repos_in_team = len(repos)
+        for repo_idx, (git_url, (repo_display, comp_names)) in enumerate(repos.items(), 1):
             repos_checked += 1
-            print(f"  [{repos_checked}] Cloning {Fore.BLUE}{repo_display}{Style.RESET_ALL} ...", end=" " if not args.verbose else "\n", flush=True)
+            progress = f"Team: {team_idx}/{total_teams}, App {repo_idx}/{total_repos_in_team}"
+            print(f"  [{progress}] Cloning {Fore.BLUE}{repo_display}{Style.RESET_ALL} ...", end=" " if not args.verbose else "\n", flush=True)
             content = fetch_file_from_repo(git_url, args.checkFilename, verbose=args.verbose)
 
             prefix = "  Result: " if args.verbose else ""
+            if content == "PERMISSION_DENIED":
+                print(f"{prefix}{Fore.YELLOW}permission denied{Style.RESET_ALL}")
+                repos_permission_denied.append(repo_display)
+                continue
             if content is None:
                 print(f"{prefix}{Fore.YELLOW}'{args.checkFilename}' not found{Style.RESET_ALL}")
                 continue
@@ -517,6 +696,44 @@ def main():
                       f"{Fore.BLUE}{repo_display}{Style.RESET_ALL} | "
                       f"{captured}")
 
+    # Apply compliance filtering if compare-repo was provided
+    if version_dates and tolerance is not None:
+        today = datetime.now()
+        filtered_results = []
+        compliant_count = 0
+        for row in results:
+            groups = row[2:]
+            # Auto-detect which capture group matches a version in the tag map
+            matched_version = None
+            for group_val in groups:
+                version = extract_semver(group_val)
+                if version and version in version_dates:
+                    matched_version = version
+                    break
+
+            if matched_version:
+                date_str = version_dates[matched_version]
+                try:
+                    tag_date = datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    # Include with unknown date if parsing fails
+                    filtered_results.append(row + ("Unknown", "Unknown"))
+                    continue
+                age = today - tag_date
+                age_days = age.days
+                if age > tolerance:
+                    filtered_results.append(row + (date_str, str(age_days)))
+                else:
+                    compliant_count += 1
+            else:
+                # Version not found in tags — include with warning
+                filtered_results.append(row + ("Unknown", "Unknown"))
+
+        print(f"\n{Fore.CYAN}Compliance filtering: {compliant_count} result(s) within tolerance, "
+              f"{len(filtered_results)} out of compliance or unknown{Style.RESET_ALL}")
+        results = filtered_results
+        total_matches = len(results)
+
     # Consolidated results
     if results:
         print(f"\n{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
@@ -524,10 +741,21 @@ def main():
         for row in results:
             team_name_r = row[0]
             repo_display_r = row[1]
-            captured_r = ", ".join(row[2:])
-            print(f"  {Fore.GREEN}{team_name_r}{Style.RESET_ALL} | "
-                  f"{Fore.BLUE}{repo_display_r}{Style.RESET_ALL} | "
-                  f"{captured_r}")
+            # With compliance filtering, last two elements are date and age
+            if version_dates and tolerance is not None:
+                captured_r = ", ".join(row[2:-2])
+                last_updated = row[-2]
+                age_days = row[-1]
+                date_color = Fore.YELLOW if last_updated == "Unknown" else ""
+                print(f"  {Fore.GREEN}{team_name_r}{Style.RESET_ALL} | "
+                      f"{Fore.BLUE}{repo_display_r}{Style.RESET_ALL} | "
+                      f"{captured_r} | "
+                      f"{date_color}Last Updated: {last_updated} | Age: {age_days} days{Style.RESET_ALL}")
+            else:
+                captured_r = ", ".join(row[2:])
+                print(f"  {Fore.GREEN}{team_name_r}{Style.RESET_ALL} | "
+                      f"{Fore.BLUE}{repo_display_r}{Style.RESET_ALL} | "
+                      f"{captured_r}")
 
     # Summary
     print(f"\n{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
@@ -539,6 +767,11 @@ def main():
     if teams_not_found:
         print(f"\n{Fore.RED}Error: Teams not found in Backstage: {', '.join(teams_not_found)}{Style.RESET_ALL}")
 
+    if repos_permission_denied:
+        print(f"\n{Fore.YELLOW}Warning: Permission denied for {len(repos_permission_denied)} repository(ies):{Style.RESET_ALL}")
+        for repo_name in repos_permission_denied:
+            print(f"  {Fore.YELLOW}- {repo_name}{Style.RESET_ALL}")
+
     # CSV export
     if args.output and results:
         num_groups = compiled_regex.groups
@@ -547,6 +780,8 @@ def main():
             match_headers = [group_texts[0]] if group_texts else ["Match"]
         else:
             match_headers = group_texts if len(group_texts) == num_groups else [f"Match{i+1}" for i in range(num_groups)]
+        if version_dates and tolerance is not None:
+            match_headers.extend(["Last Updated", "Age (in days)"])
         with open(args.output, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(["Team", "Repository"] + match_headers)

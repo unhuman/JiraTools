@@ -23,7 +23,7 @@ Useful Stuff for working with Jira
 - `backstageTools.py`: Shared Backstage API utilities for querying components and teams
 
 ## Setup
-`pip install colorama jira networkx pandas openpyxl requests`
+`pip install aiohttp colorama jira networkx pandas openpyxl requests`
 
 ## Testing
 ```bash

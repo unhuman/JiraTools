@@ -1,8 +1,9 @@
+import asyncio
 import os
 import re
 import pytest
 from datetime import timedelta
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -11,7 +12,11 @@ from codeAudit import (
     validate_regex, extract_repo_name, normalize_git_url_to_ssh,
     build_match_display, extract_capture_groups,
     parse_date_tolerance, extract_semver, fetch_repo_tags,
-    _is_permission_error, _create_compliance_tickets
+    _is_permission_error, _create_compliance_tickets,
+    _is_async_permission_error,
+    async_get_component_repo_url, async_fetch_file_from_repo,
+    async_gather_repo_urls, async_process_repos,
+    parse_arguments,
 )
 
 
@@ -343,3 +348,208 @@ class TestCreateComplianceTickets:
         results = [("TeamA", "org/repo", "1.0.0", "2024-01-01", "500")]
         # Should not raise
         _create_compliance_tickets(args, config, results, {})
+
+
+# --- Async tests ---
+
+class TestIsAsyncPermissionError:
+    def test_permission_denied(self):
+        assert _is_async_permission_error(128, "Permission denied (publickey).") is True
+
+    def test_success_is_not_error(self):
+        assert _is_async_permission_error(0, "") is False
+
+    def test_terminal_prompts_disabled(self):
+        assert _is_async_permission_error(128, "fatal: terminal prompts disabled") is True
+
+    def test_other_error_is_not_permission(self):
+        assert _is_async_permission_error(128, "fatal: repository not found") is False
+
+
+class TestAsyncGetComponentRepoUrl:
+    @pytest.mark.asyncio
+    async def test_successful_fetch(self):
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = AsyncMock(return_value={
+            'metadata': {
+                'annotations': {
+                    'git-repository-url': 'https://github.com/org/repo.git'
+                }
+            }
+        })
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_response),
+            __aexit__=AsyncMock(return_value=False),
+        ))
+
+        git_url, display = await async_get_component_repo_url(
+            mock_session, "https://backstage.example.com", "my-service"
+        )
+        assert git_url == "git@github.com:org/repo.git"
+        assert display == "org/repo"
+
+    @pytest.mark.asyncio
+    async def test_missing_annotation_returns_none(self):
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = AsyncMock(return_value={
+            'metadata': {'annotations': {}}
+        })
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_response),
+            __aexit__=AsyncMock(return_value=False),
+        ))
+
+        git_url, display = await async_get_component_repo_url(
+            mock_session, "https://backstage.example.com", "no-repo"
+        )
+        assert git_url is None
+        assert display is None
+
+    @pytest.mark.asyncio
+    async def test_request_exception_returns_none(self):
+        mock_session = AsyncMock()
+        mock_session.get = MagicMock(return_value=AsyncMock(
+            __aenter__=AsyncMock(side_effect=Exception("connection error")),
+            __aexit__=AsyncMock(return_value=False),
+        ))
+
+        git_url, display = await async_get_component_repo_url(
+            mock_session, "https://backstage.example.com", "bad-service"
+        )
+        assert git_url is None
+        assert display is None
+
+
+class TestAsyncFetchFileFromRepo:
+    @pytest.mark.asyncio
+    @patch('codeAudit.shutil.rmtree')
+    @patch('codeAudit.tempfile.mkdtemp', return_value='/tmp/codeAudit_async_test')
+    @patch('codeAudit._async_run_git')
+    async def test_permission_denied(self, mock_async_git, mock_mkdtemp, mock_rmtree):
+        # init, remote add, config succeed; pull fails with permission error
+        mock_async_git.side_effect = [
+            (0, '', ''),  # init
+            (0, '', ''),  # remote add
+            (0, '', ''),  # config sparseCheckout
+            (128, '', 'Permission denied (publickey).'),  # pull
+        ]
+        with patch('builtins.open', MagicMock()):
+            with patch('os.makedirs'):
+                result = await async_fetch_file_from_repo(
+                    "git@github.com:org/private.git", "build.gradle"
+                )
+        assert result == "PERMISSION_DENIED"
+        mock_rmtree.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch('codeAudit.shutil.rmtree')
+    @patch('codeAudit.tempfile.mkdtemp', return_value='/tmp/codeAudit_async_test')
+    @patch('codeAudit._async_run_git')
+    async def test_file_not_found_returns_none(self, mock_async_git, mock_mkdtemp, mock_rmtree):
+        mock_async_git.side_effect = [
+            (0, '', ''),  # init
+            (0, '', ''),  # remote add
+            (0, '', ''),  # config sparseCheckout
+            (0, '', ''),  # pull
+        ]
+        with patch('builtins.open', MagicMock()):
+            with patch('os.makedirs'):
+                with patch('os.path.isfile', return_value=False):
+                    result = await async_fetch_file_from_repo(
+                        "git@github.com:org/repo.git", "missing.txt"
+                    )
+        assert result is None
+
+    @pytest.mark.asyncio
+    @patch('codeAudit.shutil.rmtree')
+    @patch('codeAudit.tempfile.mkdtemp', return_value='/tmp/codeAudit_async_test')
+    @patch('codeAudit._async_run_git')
+    async def test_init_failure_returns_none(self, mock_async_git, mock_mkdtemp, mock_rmtree):
+        mock_async_git.side_effect = [
+            (128, '', 'error'),  # init fails
+        ]
+        result = await async_fetch_file_from_repo(
+            "git@github.com:org/repo.git", "file.txt"
+        )
+        assert result is None
+
+
+class TestAsyncGatherRepoUrls:
+    @pytest.mark.asyncio
+    async def test_deduplicates_repos(self):
+        """Two components mapping to the same repo URL are deduped."""
+        async def mock_fetch(session, backstage_url, comp_name, timeout=30):
+            return "git@github.com:org/shared-repo.git", "org/shared-repo"
+
+        semaphore = asyncio.Semaphore(5)
+        with patch('codeAudit.async_get_component_repo_url', side_effect=mock_fetch):
+            repos = await async_gather_repo_urls(
+                MagicMock(), "https://backstage.example.com",
+                ["comp-a", "comp-b"], semaphore,
+            )
+        assert len(repos) == 1
+        assert "git@github.com:org/shared-repo.git" in repos
+        assert repos["git@github.com:org/shared-repo.git"][1] == ["comp-a", "comp-b"]
+
+    @pytest.mark.asyncio
+    async def test_handles_none_urls(self):
+        """Components with no repo URL are skipped."""
+        call_count = 0
+        async def mock_fetch(session, backstage_url, comp_name, timeout=30):
+            nonlocal call_count
+            call_count += 1
+            if comp_name == "no-repo":
+                return None, None
+            return "git@github.com:org/repo.git", "org/repo"
+
+        semaphore = asyncio.Semaphore(5)
+        with patch('codeAudit.async_get_component_repo_url', side_effect=mock_fetch):
+            repos = await async_gather_repo_urls(
+                MagicMock(), "https://backstage.example.com",
+                ["good-comp", "no-repo"], semaphore,
+            )
+        assert len(repos) == 1
+        assert call_count == 2
+
+
+class TestAsyncProcessRepos:
+    @pytest.mark.asyncio
+    async def test_collects_results_and_permission_denied(self):
+        """Test that results and permission errors are collected correctly."""
+        async def mock_fetch(git_url, file_path, verbose=False):
+            if "private" in git_url:
+                return "PERMISSION_DENIED"
+            return '<version>1.2.3</version>'
+
+        repos = {
+            "git@github.com:org/repo.git": ("org/repo", ["comp-a"]),
+            "git@github.com:org/private-repo.git": ("org/private-repo", ["comp-b"]),
+        }
+        compiled_regex = re.compile(r'<version>(.*?)</version>', re.DOTALL)
+        semaphore = asyncio.Semaphore(5)
+
+        with patch('codeAudit.async_fetch_file_from_repo', side_effect=mock_fetch):
+            results, perm_denied, checked = await async_process_repos(
+                repos, "pom.xml", compiled_regex, "TeamA", 1, 1, semaphore, False,
+            )
+
+        assert len(results) == 1
+        assert results[0] == ("TeamA", "org/repo", "1.2.3")
+        assert perm_denied == ["org/private-repo"]
+        assert checked == 2
+
+
+class TestParallelArgument:
+    def test_default_value(self):
+        with patch('sys.argv', ['codeAudit.py', '--teams', 'A', '--checkFilename', 'f', '--searchRegex', '(x)']):
+            args = parse_arguments()
+        assert args.parallel == 5
+
+    def test_custom_value(self):
+        with patch('sys.argv', ['codeAudit.py', '--teams', 'A', '--checkFilename', 'f', '--searchRegex', '(x)', '--parallel', '5']):
+            args = parse_arguments()
+        assert args.parallel == 5

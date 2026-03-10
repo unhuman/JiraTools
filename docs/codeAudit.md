@@ -30,6 +30,7 @@ python codeAudit.py --teams <TEAMS> --checkFilename <FILE> --searchRegex <REGEX>
 | `--createTickets` | Excel file with Teams sheet for Jira ticket creation (requires `--compare-repo`, `--dateTolerance`, `--dependencyName`) |
 | `--dependencyName` | Dependency name for ticket summaries (e.g., `Spring Boot`). Requires `--createTickets` |
 | `-c, --create` | Actually create tickets in Jira (default is dry-run mode) |
+| `--parallel N` | Number of parallel async workers for Backstage API calls and git operations (default: 5, max: 15) |
 
 ## Configuration
 
@@ -93,10 +94,11 @@ python codeAudit.py --teams "TeamA,TeamB" --checkFilename pom.xml \
 3. If `--compare-repo` is provided, fetch all tags from that repo and build a version-to-date map
 4. Load config from `~/.jiraTools` and resolve Backstage URL
 5. Fetch all Backstage components in a single bulk request
-6. For each team:
+6. For each team (sequentially):
    - Filter components owned by the team
+   - Fetch repo URLs for all components concurrently (async, up to `--parallel` workers)
    - Deduplicate repositories across components
-   - Sparse-clone each repo and extract the target file
+   - Sparse-clone all repos concurrently (async, up to `--parallel` workers) and extract the target file
    - Apply regex and collect matches
 7. If compliance checking is active, filter results to only show out-of-compliance items (version tag date older than tolerance from today). Versions not found in the tag map are included with an "Unknown" date warning
 8. Display results with colored output (including "Last Updated" column when compliance checking)
@@ -123,8 +125,18 @@ When `--compare-repo` and `--dateTolerance` are provided together:
 5. A "Last Updated" column shows the tag creation date (or "Unknown" if the version wasn't found in tags)
 6. An "Age (in days)" column shows the number of days since the tag was created (or "Unknown")
 
+## Async Parallelism
+
+The script uses `asyncio` and `aiohttp` to parallelize two major I/O bottlenecks:
+
+1. **Backstage API calls**: Per-component repo URL lookups run concurrently via `aiohttp`
+2. **Git sparse-clone operations**: Repository clones run concurrently via `asyncio` subprocesses
+
+Teams are still processed sequentially for clean output grouping, but within each team, all repo URL fetches and git clone operations run in parallel up to the `--parallel` limit (default 5, max 15). Use `--parallel 1` to disable parallelism.
+
 ## Dependencies
 
+- `aiohttp` for async HTTP requests
 - `git` must be available on PATH (used for sparse checkout)
 - Backstage API accessible at the configured URL
 

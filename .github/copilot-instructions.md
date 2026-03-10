@@ -1,4 +1,4 @@
-# Copilot Instructions
+g# Copilot Instructions
 
 ## Project Overview
 - Python CLI tool collection for Jira automation, Backstage integration, Datadog analysis, and code auditing.
@@ -25,5 +25,5 @@
 - Each test file starts with `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))`.
 
 ## Dependencies
-- Core: `colorama jira networkx pandas openpyxl requests`
-- Test: `pytest`
+- Core: `aiohttp colorama jira networkx pandas openpyxl requests`
+- Test: `pytest pytest-asyncio`

@@ -385,19 +385,26 @@ def _is_async_permission_error(returncode, stderr):
     return any(indicator in stderr_lower for indicator in permission_indicators)
 
 
-async def _async_run_git(cmd, cwd, timeout, verbose, step_label):
+async def _async_run_git(cmd, cwd, timeout, verbose, step_label, log_lines=None):
     """Run a git command asynchronously, optionally logging details.
 
     Sets GIT_TERMINAL_PROMPT=0 to prevent interactive password prompts.
+    When log_lines is provided, appends log messages there instead of printing.
 
     Returns:
         Tuple of (returncode, stdout, stderr)
     """
+    def _log(msg):
+        if log_lines is not None:
+            log_lines.append(msg)
+        else:
+            print(msg)
+
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
     if verbose:
-        print(f"\n      {Fore.MAGENTA}[git] {step_label}: {' '.join(cmd)}{Style.RESET_ALL}")
+        _log(f"\n      {Fore.MAGENTA}[git] {step_label}: {' '.join(cmd)}{Style.RESET_ALL}")
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE,
@@ -415,16 +422,16 @@ async def _async_run_git(cmd, cwd, timeout, verbose, step_label):
     if verbose:
         if stdout.strip():
             for line in stdout.strip().splitlines():
-                print(f"        stdout: {line}")
+                _log(f"        stdout: {line}")
         if stderr.strip():
             for line in stderr.strip().splitlines():
-                print(f"        stderr: {line}")
+                _log(f"        stderr: {line}")
         if returncode != 0:
-            print(f"        {Fore.RED}exit code: {returncode}{Style.RESET_ALL}")
+            _log(f"        {Fore.RED}exit code: {returncode}{Style.RESET_ALL}")
     return returncode, stdout, stderr
 
 
-async def async_get_component_repo_url(session, backstage_url, component_name, timeout=30):
+async def async_get_component_repo_url(session, backstage_url, component_name, timeout=30, log_lines=None):
     """Async version of get_component_repo_url using an aiohttp session.
 
     Args:
@@ -432,10 +439,17 @@ async def async_get_component_repo_url(session, backstage_url, component_name, t
         backstage_url: Base URL for Backstage instance
         component_name: Name of the component
         timeout: Request timeout in seconds
+        log_lines: If provided, append log messages here instead of printing
 
     Returns:
         Tuple of (git_url, repo_display_name) or (None, None) if not found
     """
+    def _log(msg):
+        if log_lines is not None:
+            log_lines.append(msg)
+        else:
+            print(msg)
+
     url = f"{backstage_url}/api/catalog/entities/by-name/component/default/{component_name}"
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
@@ -449,11 +463,11 @@ async def async_get_component_repo_url(session, backstage_url, component_name, t
             repo_display = extract_repo_name(git_url)
             return git_url, repo_display
     except Exception as e:
-        print(f"{Fore.YELLOW}  Warning: Could not fetch component '{component_name}': {e}{Style.RESET_ALL}")
+        _log(f"{Fore.YELLOW}  Warning: Could not fetch component '{component_name}': {e}{Style.RESET_ALL}")
         return None, None
 
 
-async def async_fetch_file_from_repo(git_url, file_path, verbose=False):
+async def async_fetch_file_from_repo(git_url, file_path, verbose=False, log_lines=None):
     """Async version of fetch_file_from_repo using asyncio subprocesses.
 
     Uses sparse checkout to fetch a single file from a git repository.
@@ -462,24 +476,31 @@ async def async_fetch_file_from_repo(git_url, file_path, verbose=False):
         git_url: Git clone URL (SSH or HTTPS)
         file_path: Path to the file within the repository
         verbose: If True, log all git commands and their output
+        log_lines: If provided, append log messages here instead of printing
 
     Returns:
         File contents as a string, None if not found, or 'PERMISSION_DENIED'
     """
+    def _log(msg):
+        if log_lines is not None:
+            log_lines.append(msg)
+        else:
+            print(msg)
+
     temp_dir = tempfile.mkdtemp(prefix="codeAudit_")
     if verbose:
-        print(f"\n      {Fore.MAGENTA}[git] temp dir: {temp_dir}{Style.RESET_ALL}")
+        _log(f"\n      {Fore.MAGENTA}[git] temp dir: {temp_dir}{Style.RESET_ALL}")
 
     try:
         # Initialize a new repo
-        rc, _, _ = await _async_run_git(["git", "init"], temp_dir, 30, verbose, "init")
+        rc, _, _ = await _async_run_git(["git", "init"], temp_dir, 30, verbose, "init", log_lines)
         if rc != 0:
             return None
 
         # Add the remote
         rc, _, _ = await _async_run_git(
             ["git", "remote", "add", "origin", git_url],
-            temp_dir, 30, verbose, "remote add"
+            temp_dir, 30, verbose, "remote add", log_lines
         )
         if rc != 0:
             return None
@@ -487,7 +508,7 @@ async def async_fetch_file_from_repo(git_url, file_path, verbose=False):
         # Enable sparse checkout
         rc, _, _ = await _async_run_git(
             ["git", "config", "core.sparseCheckout", "true"],
-            temp_dir, 30, verbose, "config sparseCheckout"
+            temp_dir, 30, verbose, "config sparseCheckout", log_lines
         )
         if rc != 0:
             return None
@@ -498,12 +519,12 @@ async def async_fetch_file_from_repo(git_url, file_path, verbose=False):
         with open(sparse_checkout_file, 'w') as f:
             f.write(file_path + "\n")
         if verbose:
-            print(f"      {Fore.MAGENTA}[git] sparse-checkout file contents: '{file_path}'{Style.RESET_ALL}")
+            _log(f"      {Fore.MAGENTA}[git] sparse-checkout file contents: '{file_path}'{Style.RESET_ALL}")
 
         # Pull the remote's default branch (HEAD)
         rc, stdout, stderr = await _async_run_git(
             ["git", "pull", "--depth", "1", "origin", "HEAD"],
-            temp_dir, 60, verbose, "pull origin HEAD"
+            temp_dir, 60, verbose, "pull origin HEAD", log_lines
         )
         if rc != 0:
             if _is_async_permission_error(rc, stderr):
@@ -513,8 +534,8 @@ async def async_fetch_file_from_repo(git_url, file_path, verbose=False):
         # Check what files exist
         target = os.path.join(temp_dir, file_path)
         if verbose:
-            print(f"      {Fore.MAGENTA}[git] Checking for file: {target}{Style.RESET_ALL}")
-            print(f"      {Fore.MAGENTA}[git] File exists: {os.path.isfile(target)}{Style.RESET_ALL}")
+            _log(f"      {Fore.MAGENTA}[git] Checking for file: {target}{Style.RESET_ALL}")
+            _log(f"      {Fore.MAGENTA}[git] File exists: {os.path.isfile(target)}{Style.RESET_ALL}")
             all_files = []
             for root, dirs, files in os.walk(temp_dir):
                 if '.git' in root:
@@ -523,9 +544,9 @@ async def async_fetch_file_from_repo(git_url, file_path, verbose=False):
                     rel = os.path.relpath(os.path.join(root, fname), temp_dir)
                     all_files.append(rel)
             if all_files:
-                print(f"      {Fore.MAGENTA}[git] Files checked out: {', '.join(all_files)}{Style.RESET_ALL}")
+                _log(f"      {Fore.MAGENTA}[git] Files checked out: {', '.join(all_files)}{Style.RESET_ALL}")
             else:
-                print(f"      {Fore.MAGENTA}[git] No files were checked out{Style.RESET_ALL}")
+                _log(f"      {Fore.MAGENTA}[git] No files were checked out{Style.RESET_ALL}")
 
         if os.path.isfile(target):
             with open(target, 'r', errors='replace') as f:
@@ -533,16 +554,16 @@ async def async_fetch_file_from_repo(git_url, file_path, verbose=False):
         return None
 
     except subprocess.TimeoutExpired:
-        print(f"{Fore.YELLOW}  Warning: Git operation timed out for {git_url}{Style.RESET_ALL}")
+        _log(f"{Fore.YELLOW}  Warning: Git operation timed out for {git_url}{Style.RESET_ALL}")
         return None
     except Exception as e:
-        print(f"{Fore.YELLOW}  Warning: Error fetching file from {git_url}: {e}{Style.RESET_ALL}")
+        _log(f"{Fore.YELLOW}  Warning: Error fetching file from {git_url}: {e}{Style.RESET_ALL}")
         return None
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-async def async_gather_repo_urls(session, backstage_url, component_names, semaphore):
+async def async_gather_repo_urls(session, backstage_url, component_names, semaphore, team_log_lines=None):
     """Fetch repo URLs for multiple components concurrently.
 
     Args:
@@ -550,13 +571,22 @@ async def async_gather_repo_urls(session, backstage_url, component_names, semaph
         backstage_url: Base URL for Backstage instance
         component_names: List of component names to query
         semaphore: asyncio.Semaphore for concurrency limiting
+        team_log_lines: If provided, append log messages here instead of printing
 
     Returns:
         Dict mapping git_url -> (repo_display, [component_names]), with deduplication
     """
+    def _log(msg):
+        if team_log_lines is not None:
+            team_log_lines.append(msg)
+        else:
+            print(msg)
+
     async def _fetch_one(comp_name):
+        log_lines = []
         async with semaphore:
-            return comp_name, await async_get_component_repo_url(session, backstage_url, comp_name)
+            result = await async_get_component_repo_url(session, backstage_url, comp_name, log_lines=log_lines)
+            return comp_name, result, log_lines
 
     tasks = [_fetch_one(name) for name in component_names if name]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -564,21 +594,26 @@ async def async_gather_repo_urls(session, backstage_url, component_names, semaph
     repos = {}
     for result in results:
         if isinstance(result, Exception):
-            print(f"{Fore.YELLOW}  Warning: Unexpected error during repo URL fetch: {result}{Style.RESET_ALL}")
+            _log(f"{Fore.YELLOW}  Warning: Unexpected error during repo URL fetch: {result}{Style.RESET_ALL}")
             continue
-        comp_name, (git_url, repo_display) = result
+        comp_name, (git_url, repo_display), log_lines = result
+        for line in log_lines:
+            _log(line)
         if git_url:
             if git_url not in repos:
                 repos[git_url] = (repo_display, [])
             repos[git_url][1].append(comp_name)
         else:
-            print(f"{Fore.YELLOW}  No git repository found for component: {comp_name}{Style.RESET_ALL}")
+            _log(f"{Fore.YELLOW}  No git repository found for component: {comp_name}{Style.RESET_ALL}")
     return repos
 
 
 async def async_process_repos(repos, check_filename, compiled_regex, team_name, team_idx,
-                              total_teams, semaphore, verbose):
+                              total_teams, semaphore, verbose, team_log_lines=None):
     """Fetch files from multiple repos concurrently and apply regex.
+
+    Each task buffers its log output; after all tasks complete, logs are
+    printed sequentially in repo order to avoid interleaved output.
 
     Args:
         repos: Dict mapping git_url -> (repo_display, [component_names])
@@ -589,22 +624,31 @@ async def async_process_repos(repos, check_filename, compiled_regex, team_name, 
         total_teams: Total number of teams for progress display
         semaphore: asyncio.Semaphore for concurrency limiting
         verbose: If True, log git operation details
+        team_log_lines: If provided, append log messages here instead of printing
 
     Returns:
         Tuple of (results_list, repos_permission_denied_list, repos_checked_count)
     """
+    def _log(msg):
+        if team_log_lines is not None:
+            team_log_lines.append(msg)
+        else:
+            print(msg)
+
     results = []
     repos_permission_denied = []
     repos_checked = 0
     total_repos_in_team = len(repos)
 
     async def _process_one(repo_idx, git_url, repo_display, comp_names):
+        log_lines = []
         async with semaphore:
             progress = f"Team: {team_idx}/{total_teams} ({team_name}), App {repo_idx}/{total_repos_in_team}"
-            print(f"  [{progress}] Cloning {Fore.BLUE}{repo_display}{Style.RESET_ALL} ...",
-                  end=" " if not verbose else "\n", flush=True)
-            content = await async_fetch_file_from_repo(git_url, check_filename, verbose=verbose)
-            return repo_idx, git_url, repo_display, comp_names, content
+            log_lines.append(
+                f"  [{progress}] Cloning {Fore.BLUE}{repo_display}{Style.RESET_ALL} ..."
+            )
+            content = await async_fetch_file_from_repo(git_url, check_filename, verbose=verbose, log_lines=log_lines)
+            return repo_idx, git_url, repo_display, comp_names, content, log_lines
 
     tasks = [
         _process_one(idx, git_url, repo_display, comp_names)
@@ -614,36 +658,121 @@ async def async_process_repos(repos, check_filename, compiled_regex, team_name, 
 
     for result in task_results:
         if isinstance(result, Exception):
-            print(f"{Fore.YELLOW}  Warning: Unexpected error during repo processing: {result}{Style.RESET_ALL}")
+            _log(f"{Fore.YELLOW}  Warning: Unexpected error during repo processing: {result}{Style.RESET_ALL}")
             repos_checked += 1
             continue
-        repo_idx, git_url, repo_display, comp_names, content = result
+        repo_idx, git_url, repo_display, comp_names, content, log_lines = result
+
+        # Emit all buffered log lines for this repo
+        for line in log_lines:
+            _log(line)
+
         repos_checked += 1
         prefix = "  Result: " if verbose else ""
 
         if content == "PERMISSION_DENIED":
-            print(f"{prefix}{Fore.YELLOW}permission denied — {repo_display}{Style.RESET_ALL}")
+            _log(f"{prefix}{Fore.YELLOW}permission denied — {repo_display}{Style.RESET_ALL}")
             repos_permission_denied.append(repo_display)
             continue
         if content is None:
-            print(f"{prefix}{Fore.YELLOW}'{check_filename}' not found — {repo_display}{Style.RESET_ALL}")
+            _log(f"{prefix}{Fore.YELLOW}'{check_filename}' not found — {repo_display}{Style.RESET_ALL}")
             continue
 
         match_list = list(compiled_regex.finditer(content))
         if not match_list:
-            print(f"{prefix}found file, {Fore.YELLOW}no regex matches — {repo_display}{Style.RESET_ALL}")
+            _log(f"{prefix}found file, {Fore.YELLOW}no regex matches — {repo_display}{Style.RESET_ALL}")
             continue
 
-        print(f"{prefix}found file, {Fore.GREEN}{len(match_list)} match(es) — {repo_display}{Style.RESET_ALL}")
+        _log(f"{prefix}found file, {Fore.GREEN}{len(match_list)} match(es) — {repo_display}{Style.RESET_ALL}")
         for match in match_list:
             groups = match.groups()
             captured = ", ".join(groups)
             results.append((team_name, repo_display) + groups)
-            print(f"    {Fore.GREEN}{team_name}{Style.RESET_ALL} | "
-                  f"{Fore.BLUE}{repo_display}{Style.RESET_ALL} | "
-                  f"{captured}")
+            _log(f"    {Fore.GREEN}{team_name}{Style.RESET_ALL} | "
+                 f"{Fore.BLUE}{repo_display}{Style.RESET_ALL} | "
+                 f"{captured}")
 
     return results, repos_permission_denied, repos_checked
+
+
+async def async_process_team(session, backstage_url, all_components, team_name, team_idx,
+                             total_teams, check_filename, compiled_regex, semaphore, verbose):
+    """Process one team end-to-end: URL gathering + repo processing.
+
+    All output is buffered into log_lines so that cross-team async execution
+    does not produce interleaved console output.
+
+    Args:
+        session: aiohttp.ClientSession instance
+        backstage_url: Base URL for Backstage instance
+        all_components: Pre-fetched list of all Backstage components
+        team_name: Team name to process
+        team_idx: Current team index for progress display
+        total_teams: Total number of teams for progress display
+        check_filename: File path to look for in each repo
+        compiled_regex: Compiled regex pattern to apply
+        semaphore: asyncio.Semaphore for concurrency limiting
+        verbose: If True, log git operation details
+
+    Returns:
+        Dict with keys: team_name, log_lines, results, perm_denied,
+        repos_checked, team_not_found, team_processed
+    """
+    log_lines = []
+    log_lines.append(f"\n{Fore.CYAN}Processing team: {team_name}{Style.RESET_ALL}")
+
+    # Get components owned by this team (local filter, no I/O)
+    team_components = filter_components_for_team(all_components, team_name, comp_type=None)
+    if not team_components:
+        log_lines.append(f"  No components found for team {team_name}")
+        return {
+            'team_name': team_name,
+            'log_lines': log_lines,
+            'results': [],
+            'perm_denied': [],
+            'repos_checked': 0,
+            'team_not_found': True,
+            'team_processed': False,
+        }
+
+    component_names = [comp.get('metadata', {}).get('name', '') for comp in team_components]
+    log_lines.append(f"  Found {len(component_names)} application(s): {', '.join(component_names)}")
+
+    # Async: fetch all repo URLs concurrently
+    repos = await async_gather_repo_urls(session, backstage_url, component_names, semaphore,
+                                         team_log_lines=log_lines)
+
+    if not repos:
+        log_lines.append(f"  No repositories found for team {team_name}")
+        return {
+            'team_name': team_name,
+            'log_lines': log_lines,
+            'results': [],
+            'perm_denied': [],
+            'repos_checked': 0,
+            'team_not_found': False,
+            'team_processed': False,
+        }
+
+    deduped = len(component_names) - len(repos)
+    dedup_msg = f" ({deduped} duplicate(s) removed)" if deduped > 0 else ""
+    log_lines.append(f"  Checking {len(repos)} unique repository(ies) for '{check_filename}'{dedup_msg}")
+
+    # Async: fetch and analyze files from all repos concurrently
+    team_results, team_perm_denied, team_repos_checked = await async_process_repos(
+        repos, check_filename, compiled_regex, team_name, team_idx,
+        total_teams, semaphore, verbose, team_log_lines=log_lines,
+    )
+
+    return {
+        'team_name': team_name,
+        'log_lines': log_lines,
+        'results': team_results,
+        'perm_denied': team_perm_denied,
+        'repos_checked': team_repos_checked,
+        'team_not_found': False,
+        'team_processed': True,
+    }
 
 
 def fetch_file_from_repo(git_url, file_path, verbose=False):
@@ -1095,7 +1224,7 @@ async def async_main(args, config, backstage_url, compiled_regex, compare_repo, 
     semaphore = asyncio.Semaphore(args.parallel)
     print(f"{Fore.CYAN}Using {args.parallel} parallel worker(s){Style.RESET_ALL}")
 
-    # Process each team (teams sequential, repos within team parallel)
+    # Process all teams concurrently (semaphore limits total in-flight I/O)
     results = []
     teams_not_found = []
     repos_permission_denied = []
@@ -1107,40 +1236,52 @@ async def async_main(args, config, backstage_url, compiled_regex, compare_repo, 
     total_teams = len(sorted_teams)
 
     async with aiohttp.ClientSession() as session:
-        for team_idx, team_name in enumerate(sorted_teams, 1):
-            print(f"\n{Fore.CYAN}Processing team: {team_name}{Style.RESET_ALL}")
-
-            # Get components owned by this team (local filter, no I/O)
-            team_components = filter_components_for_team(all_components, team_name, comp_type=None)
-            if not team_components:
-                print(f"  No components found for team {team_name}")
-                teams_not_found.append(team_name)
-                continue
-
-            component_names = [comp.get('metadata', {}).get('name', '') for comp in team_components]
-            print(f"  Found {len(component_names)} application(s): {', '.join(component_names)}")
-
-            # Async: fetch all repo URLs concurrently
-            repos = await async_gather_repo_urls(session, backstage_url, component_names, semaphore)
-
-            if not repos:
-                print(f"  No repositories found for team {team_name}")
-                continue
-
-            deduped = len(component_names) - len(repos)
-            dedup_msg = f" ({deduped} duplicate(s) removed)" if deduped > 0 else ""
-            print(f"  Checking {len(repos)} unique repository(ies) for '{args.checkFilename}'{dedup_msg}")
-            teams_processed += 1
-
-            # Async: fetch and analyze files from all repos concurrently
-            team_results, team_perm_denied, team_repos_checked = await async_process_repos(
-                repos, args.checkFilename, compiled_regex, team_name, team_idx,
-                total_teams, semaphore, args.verbose,
+        team_tasks = [
+            async_process_team(
+                session, backstage_url, all_components, team_name, team_idx,
+                total_teams, args.checkFilename, compiled_regex, semaphore, args.verbose,
             )
-            results.extend(team_results)
-            repos_permission_denied.extend(team_perm_denied)
-            repos_checked += team_repos_checked
-            total_matches += len(team_results)
+            for team_idx, team_name in enumerate(sorted_teams, 1)
+        ]
+
+        # Use as_completed to show live progress as teams finish
+        completed = 0
+        with_repos = 0
+        team_outputs = []
+        for future in asyncio.as_completed(team_tasks):
+            try:
+                output = await future
+                team_outputs.append(output)
+                if isinstance(output, dict) and output.get('team_processed'):
+                    with_repos += 1
+            except Exception as e:
+                team_outputs.append(e)
+            completed += 1
+            print(f"\r{Fore.CYAN}  Progress: {completed}/{total_teams} teams completed "
+                  f"({with_repos} with repos){Style.RESET_ALL}    ", end="", flush=True)
+        print()  # newline after progress line
+
+    # Print buffered output sorted alphabetically by team name
+    valid_outputs = []
+    for output in team_outputs:
+        if isinstance(output, Exception):
+            print(f"{Fore.YELLOW}Warning: Unexpected error processing a team: {output}{Style.RESET_ALL}")
+            continue
+        valid_outputs.append(output)
+
+    for output in sorted(valid_outputs, key=lambda x: x['team_name']):
+        # Print buffered log lines for this team
+        for line in output['log_lines']:
+            print(line)
+
+        if output['team_not_found']:
+            teams_not_found.append(output['team_name'])
+        if output['team_processed']:
+            teams_processed += 1
+        results.extend(output['results'])
+        repos_permission_denied.extend(output['perm_denied'])
+        repos_checked += output['repos_checked']
+        total_matches += len(output['results'])
 
     # Apply compliance filtering if compare-repo was provided
     if version_dates and tolerance is not None:

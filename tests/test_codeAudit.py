@@ -15,7 +15,7 @@ from codeAudit import (
     _is_permission_error, _create_compliance_tickets,
     _is_async_permission_error,
     async_get_component_repo_url, async_fetch_file_from_repo,
-    async_gather_repo_urls, async_process_repos,
+    async_gather_repo_urls, async_process_repos, async_process_team,
     parse_arguments,
 )
 
@@ -482,7 +482,7 @@ class TestAsyncGatherRepoUrls:
     @pytest.mark.asyncio
     async def test_deduplicates_repos(self):
         """Two components mapping to the same repo URL are deduped."""
-        async def mock_fetch(session, backstage_url, comp_name, timeout=30):
+        async def mock_fetch(session, backstage_url, comp_name, timeout=30, log_lines=None):
             return "git@github.com:org/shared-repo.git", "org/shared-repo"
 
         semaphore = asyncio.Semaphore(5)
@@ -499,7 +499,7 @@ class TestAsyncGatherRepoUrls:
     async def test_handles_none_urls(self):
         """Components with no repo URL are skipped."""
         call_count = 0
-        async def mock_fetch(session, backstage_url, comp_name, timeout=30):
+        async def mock_fetch(session, backstage_url, comp_name, timeout=30, log_lines=None):
             nonlocal call_count
             call_count += 1
             if comp_name == "no-repo":
@@ -520,7 +520,7 @@ class TestAsyncProcessRepos:
     @pytest.mark.asyncio
     async def test_collects_results_and_permission_denied(self):
         """Test that results and permission errors are collected correctly."""
-        async def mock_fetch(git_url, file_path, verbose=False):
+        async def mock_fetch(git_url, file_path, verbose=False, log_lines=None):
             if "private" in git_url:
                 return "PERMISSION_DENIED"
             return '<version>1.2.3</version>'
@@ -541,6 +541,71 @@ class TestAsyncProcessRepos:
         assert results[0] == ("TeamA", "org/repo", "1.2.3")
         assert perm_denied == ["org/private-repo"]
         assert checked == 2
+
+
+class TestAsyncProcessTeam:
+    @pytest.mark.asyncio
+    async def test_team_not_found(self):
+        """Team with no components returns team_not_found=True."""
+        semaphore = asyncio.Semaphore(5)
+        with patch('codeAudit.filter_components_for_team', return_value=[]):
+            result = await async_process_team(
+                MagicMock(), "https://backstage.example.com", [],
+                "ghost-team", 1, 1, "pom.xml", MagicMock(), semaphore, False,
+            )
+        assert result['team_name'] == "ghost-team"
+        assert result['team_not_found'] is True
+        assert result['team_processed'] is False
+        assert result['results'] == []
+        assert result['repos_checked'] == 0
+
+    @pytest.mark.asyncio
+    async def test_team_no_repos(self):
+        """Team with components but no repos returns team_processed=False."""
+        components = [{'metadata': {'name': 'comp-a'}}]
+        semaphore = asyncio.Semaphore(5)
+
+        async def mock_gather(session, url, names, sem, team_log_lines=None):
+            return {}
+
+        with patch('codeAudit.filter_components_for_team', return_value=components):
+            with patch('codeAudit.async_gather_repo_urls', side_effect=mock_gather):
+                result = await async_process_team(
+                    MagicMock(), "https://backstage.example.com", [],
+                    "empty-team", 1, 1, "pom.xml", MagicMock(), semaphore, False,
+                )
+        assert result['team_name'] == "empty-team"
+        assert result['team_not_found'] is False
+        assert result['team_processed'] is False
+
+    @pytest.mark.asyncio
+    async def test_team_with_results(self):
+        """Team with repos and matches returns team_processed=True with results."""
+        import re as re_mod
+        components = [{'metadata': {'name': 'comp-a'}}]
+        repos = {"git@github.com:org/repo.git": ("org/repo", ["comp-a"])}
+        compiled_regex = re_mod.compile(r'<version>(.*?)</version>', re_mod.DOTALL)
+        semaphore = asyncio.Semaphore(5)
+
+        async def mock_gather(session, url, names, sem, team_log_lines=None):
+            return repos
+
+        async def mock_process(rp, fn, rx, tn, ti, tt, sem, v, team_log_lines=None):
+            return [("my-team", "org/repo", "1.2.3")], [], 1
+
+        with patch('codeAudit.filter_components_for_team', return_value=components):
+            with patch('codeAudit.async_gather_repo_urls', side_effect=mock_gather):
+                with patch('codeAudit.async_process_repos', side_effect=mock_process):
+                    result = await async_process_team(
+                        MagicMock(), "https://backstage.example.com", [],
+                        "my-team", 1, 1, "pom.xml", compiled_regex, semaphore, False,
+                    )
+        assert result['team_name'] == "my-team"
+        assert result['team_not_found'] is False
+        assert result['team_processed'] is True
+        assert len(result['results']) == 1
+        assert result['repos_checked'] == 1
+        assert len(result['log_lines']) > 0
 
 
 class TestParallelArgument:

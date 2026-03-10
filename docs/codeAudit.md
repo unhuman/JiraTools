@@ -94,17 +94,19 @@ python codeAudit.py --teams "TeamA,TeamB" --checkFilename pom.xml \
 3. If `--compare-repo` is provided, fetch all tags from that repo and build a version-to-date map
 4. Load config from `~/.jiraTools` and resolve Backstage URL
 5. Fetch all Backstage components in a single bulk request
-6. For each team (sequentially):
-   - Filter components owned by the team
-   - Fetch repo URLs for all components concurrently (async, up to `--parallel` workers)
+6. Process all teams concurrently (async, bounded by `--parallel` semaphore):
+   - Filter components owned by the team (in-memory)
+   - Fetch repo URLs for all components concurrently (async via `aiohttp`)
    - Deduplicate repositories across components
-   - Sparse-clone all repos concurrently (async, up to `--parallel` workers) and extract the target file
+   - Sparse-clone all repos concurrently (async subprocesses) and extract the target file
    - Apply regex and collect matches
-7. If compliance checking is active, filter results to only show out-of-compliance items (version tag date older than tolerance from today). Versions not found in the tag map are included with an "Unknown" date warning
-8. Display results with colored output (including "Last Updated" column when compliance checking)
-9. Optionally export to CSV with auto-generated column headers from capture groups (plus "Last Updated" when applicable)
-10. Report any teams not found in Backstage as errors
-11. If `--createTickets` is provided, create Jira tickets for out-of-compliance repos using team configuration from the Excel file
+   - Buffer all output per team for clean sorted display
+7. Print buffered output sorted alphabetically by team name
+8. If compliance checking is active, filter results to only show out-of-compliance items (version tag date older than tolerance from today). Versions not found in the tag map are included with an "Unknown" date warning
+9. Display results with colored output (including "Last Updated" column when compliance checking)
+10. Optionally export to CSV with auto-generated column headers from capture groups (plus "Last Updated" when applicable)
+11. Report any teams not found in Backstage as errors
+12. If `--createTickets` is provided, create Jira tickets for out-of-compliance repos using team configuration from the Excel file
 
 ## Output
 
@@ -132,7 +134,7 @@ The script uses `asyncio` and `aiohttp` to parallelize two major I/O bottlenecks
 1. **Backstage API calls**: Per-component repo URL lookups run concurrently via `aiohttp`
 2. **Git sparse-clone operations**: Repository clones run concurrently via `asyncio` subprocesses
 
-Teams are still processed sequentially for clean output grouping, but within each team, all repo URL fetches and git clone operations run in parallel up to the `--parallel` limit (default 5, max 15). Use `--parallel 1` to disable parallelism.
+All teams are processed concurrently — every team's URL fetches and git clones share a single `asyncio.Semaphore` bounded by `--parallel` (default 5, max 15). Each team buffers its console output; after all teams complete, output is printed sorted alphabetically by team name. Use `--parallel 1` to disable parallelism.
 
 ## Dependencies
 

@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import csv
 from datetime import datetime, timedelta
+import gc
 import os
 import re
 import shutil
@@ -1380,6 +1381,10 @@ async def async_main(args, config, backstage_url, compiled_regex, compare_repo, 
     # Ticket creation
     if args.createTickets and results:
         _create_compliance_tickets(args, config, results, version_dates)
+
+    # Force garbage collection while the event loop is still running
+    # to prevent "Event loop is closed" errors from subprocess transports
+    gc.collect()
 
 
 if __name__ == "__main__":

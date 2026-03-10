@@ -14,7 +14,7 @@ python codeAudit.py --teams <TEAMS> --checkFilename <FILE> --searchRegex <REGEX>
 
 | Argument | Description |
 |----------|-------------|
-| `--teams` | Comma-separated list of team names to audit |
+| `--teams` | Comma-separated list of team names to audit, or `all` / `*` to audit all teams in Backstage |
 | `--checkFilename` | File path to look for in each repository (e.g., `build.gradle`, `Dockerfile`, `pom.xml`) |
 | `--searchRegex` | Regex pattern with capture groups to apply to each file |
 

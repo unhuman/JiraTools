@@ -36,7 +36,7 @@ import requests
 from colorama import init, Fore, Style
 
 from libraries.jiraToolsConfig import load_config, get_backstage_url
-from libraries.backstageTools import get_all_components, filter_components_for_team
+from libraries.backstageTools import get_all_components, get_all_teams, filter_components_for_team
 
 
 def parse_arguments():
@@ -47,7 +47,7 @@ def parse_arguments():
     parser.add_argument(
         "--teams",
         required=True,
-        help="Comma-separated list of team names to audit"
+        help="Comma-separated list of team names to audit, or 'all' / '*' to audit all teams in Backstage"
     )
     parser.add_argument(
         "--backstageUrl",
@@ -604,7 +604,17 @@ def main():
             print(f"{Fore.GREEN}Found {len(version_dates)} semantic version tag(s) in compare repo{Style.RESET_ALL}")
 
     # Parse team names from CLI
-    teams = [t.strip() for t in args.teams.split(",") if t.strip()]
+    if args.teams.strip() in ('*', 'all'):
+        print(f"\n{Fore.CYAN}Fetching all teams from Backstage...{Style.RESET_ALL}")
+        all_teams = get_all_teams(backstage_url)
+        teams = [t.get('metadata', {}).get('name', '') for t in all_teams]
+        teams = [t for t in teams if t]
+        if not teams:
+            print(f"{Fore.RED}Error: No teams found in Backstage.{Style.RESET_ALL}")
+            sys.exit(1)
+        print(f"{Fore.GREEN}Found {len(teams)} team(s) in Backstage{Style.RESET_ALL}")
+    else:
+        teams = [t.strip() for t in args.teams.split(",") if t.strip()]
     if not teams:
         print(f"{Fore.RED}Error: No valid team names provided.{Style.RESET_ALL}")
         sys.exit(1)
@@ -667,7 +677,7 @@ def main():
         total_repos_in_team = len(repos)
         for repo_idx, (git_url, (repo_display, comp_names)) in enumerate(repos.items(), 1):
             repos_checked += 1
-            progress = f"Team: {team_idx}/{total_teams}, App {repo_idx}/{total_repos_in_team}"
+            progress = f"Team: {team_idx}/{total_teams} ({team_name}), App {repo_idx}/{total_repos_in_team}"
             print(f"  [{progress}] Cloning {Fore.BLUE}{repo_display}{Style.RESET_ALL} ...", end=" " if not args.verbose else "\n", flush=True)
             content = fetch_file_from_repo(git_url, args.checkFilename, verbose=args.verbose)
 

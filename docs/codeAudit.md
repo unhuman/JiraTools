@@ -28,7 +28,7 @@ python codeAudit.py --teams <TEAMS> --checkFilename <FILE> --searchRegex <REGEX>
 | `--compare-repo` | Git repo URL to fetch tags from for version date comparison (requires `--dateTolerance`) |
 | `--dateTolerance` | Max age for compliance, e.g., `2d` (days), `3m` (months), `1y` (years). Requires `--compare-repo` |
 | `--createTickets` | Excel file with Teams sheet for Jira ticket creation (requires `--compare-repo`, `--dateTolerance`, `--dependencyName`) |
-| `--dependencyName` | Dependency name for ticket summaries (e.g., `Spring Boot`). Requires `--createTickets` |
+| `--dependencyName` | Dependency name for ticket summaries (e.g., `Spring Boot`). Required by `--createTickets` |
 | `-c, --create` | Actually create tickets in Jira (default is dry-run mode) |
 | `--parallel N` | Number of parallel async workers for Backstage API calls and git operations (default: 5, max: 15) |
 

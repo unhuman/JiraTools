@@ -96,7 +96,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--dependencyName",
-        help="Dependency name for ticket summaries (e.g., 'Spring Boot'). Requires --createTickets"
+        help="Dependency name for ticket summaries (e.g., 'Spring Boot')"
     )
     parser.add_argument(
         "-c", "--create",
@@ -1158,9 +1158,6 @@ def main():
         if missing:
             print(f"{Fore.RED}Error: --createTickets requires {', '.join(missing)}.{Style.RESET_ALL}")
             sys.exit(1)
-    if args.dependencyName and not args.createTickets:
-        print(f"{Fore.RED}Error: --dependencyName requires --createTickets.{Style.RESET_ALL}")
-        sys.exit(1)
 
     # Parse date tolerance if provided
     tolerance = None

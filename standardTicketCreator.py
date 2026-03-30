@@ -166,12 +166,12 @@ def get_team_health_enhanced(backstage_url, team_name, categories=None):
     # Method 1: Try scorecards API endpoints
     health_data = try_scorecards_api(backstage_url, team_name, categories)
     
-    # Method 2: Fall back to catalog entity API
-    if not health_data:
+    # Method 2: Fall back to catalog entity API (only if scorecards API truly failed, not just found no gaps)
+    if health_data is None:
         health_data = try_catalog_api(backstage_url, team_name, categories)
-        
+
     # Method 3: Try alternative endpoints
-    if not health_data:
+    if health_data is None:
         health_data = try_alternative_apis(backstage_url, team_name, categories)
         
     if health_data:
@@ -244,7 +244,7 @@ def try_scorecards_api(backstage_url, team_name, categories):
                 }
             }""",
             "variables": {
-                "entityRef": f"group:default/{team_name}"
+                "entityRef": f"group:default/{team_name.lower()}"
             }
         }
         
@@ -257,13 +257,13 @@ def try_scorecards_api(backstage_url, team_name, categories):
             if 'data' in data and 'certifications' in data['data']:
                 print(f"    ✓ Successfully found GraphQL certification data")
                 health_data = parse_graphql_certifications(data, categories, team_name)
-                if health_data:
+                if health_data is not None:
                     return health_data
             else:
                 print(f"    GraphQL response structure: {list(data.keys()) if isinstance(data, dict) else 'not dict'}")
         
         # Fall back to REST API if GraphQL fails
-        url = f"{backstage_url}/api/soundcheck/results?entityRef=group:default/{team_name}"
+        url = f"{backstage_url}/api/soundcheck/results?entityRef=group:default/{team_name.lower()}"
         print(f"    Falling back to REST API: /api/soundcheck/results?entityRef=group:default/{team_name}")
         
         response = requests.get(url, timeout=30)
@@ -271,15 +271,16 @@ def try_scorecards_api(backstage_url, team_name, categories):
             data = response.json()
             print(f"    REST API fallback successful")
             health_data = parse_soundcheck_results(data, categories, team_name)
-            if health_data:
+            if health_data is not None:
                 return health_data
         
         # Fall back to other API endpoints if needed
+        team_name_lower = team_name.lower()
         api_endpoints = [
-            f"/api/scorecards/entities/group:default/{team_name}",
-            f"/api/scorecards/group/default/{team_name}",
-            f"/api/soundcheck/entities/group:default/{team_name}",
-            f"/api/tech-insights/entities/group:default/{team_name}"
+            f"/api/scorecards/entities/group:default/{team_name_lower}",
+            f"/api/scorecards/group/default/{team_name_lower}",
+            f"/api/soundcheck/entities/group:default/{team_name_lower}",
+            f"/api/tech-insights/entities/group:default/{team_name_lower}"
         ]
         
         for endpoint in api_endpoints:
@@ -445,8 +446,8 @@ def parse_graphql_certifications(data, categories, team_name):
             return health_categories
         else:
             print(f"    No compliance gaps found for {team_name}")
-            return None
-            
+            return {}  # Empty dict signals "got real data, team is compliant" vs None = "API failed"
+
     except Exception as e:
         print(f"    Error parsing GraphQL certifications: {e}")
         return None
@@ -528,8 +529,8 @@ def parse_soundcheck_results(data, categories, team_name):
         else:
             print(f"    No compliance gaps found - no tickets will be created for {team_name}")
             
-        return health_categories if health_categories else None
-        
+        return health_categories if health_categories else {}  # Empty dict = compliant, None = API failed
+
     except Exception as e:
         print(f"    Error parsing soundcheck results: {e}")
         return None
@@ -1505,16 +1506,16 @@ def get_team_categories_from_backstage(backstage_url, team_name, categories=None
     # Use the enhanced health extraction directly
     health_data = get_team_health_enhanced(backstage_url, team_name, categories)
     
-    if not health_data:
+    if health_data is None:
         return None
-        
+
     # Filter out empty categories
     filtered_categories = {}
     for category_name, category_data in health_data.items():
         if category_data:  # Only keep categories with data
             filtered_categories[category_name] = category_data
-    
-    return filtered_categories if filtered_categories else None
+
+    return filtered_categories  # May be empty dict if team is fully compliant
 
 # validate_file, filter_excel_columns, transform_to_key_value_format, process_key_rows,
 # read_excel_file, and validate_data are now imported from excelTools
@@ -2161,24 +2162,26 @@ def process_all_sheets(args, file_path, available_sheets, jira_client, default_i
         # Get team's scorecard data from Backstage using configured categories
         team_categories = get_team_categories_from_backstage(backstage_url, team_name, categories)
         
-        if team_categories:
-            # Process each category that has data
-            for category_name, category_data in team_categories.items():
-                print(f"\n{Fore.CYAN}Processing category: {category_name} for team {team_name}{Style.RESET_ALL}")
-                
-                # Create tickets for this team/category combination
-                created, skipped, dry_run_count = process_team_category_from_backstage(
-                    args, team_name, category_name, category_data, team_config, 
-                    jira_client, default_issue_type, priority, custom_fields_mapping
-                )
-                
-                all_created_tickets.extend(created)
-                all_skipped_tickets.extend(skipped)
-                total_dry_run_count += dry_run_count
-        else:
+        if team_categories is None:
             print(f"{Fore.YELLOW}No scorecard data found for team: {team_name}{Style.RESET_ALL}")
             # Count as skipped
             all_skipped_tickets.append(f"{team_name} (No Backstage data)")
+        elif not team_categories:
+            print(f"{Fore.GREEN}  ✓ {team_name} is fully compliant - no tickets needed{Style.RESET_ALL}")
+        else:
+            # Process each category that has compliance gaps
+            for category_name, category_data in team_categories.items():
+                print(f"\n{Fore.CYAN}Processing category: {category_name} for team {team_name}{Style.RESET_ALL}")
+
+                # Create tickets for this team/category combination
+                created, skipped, dry_run_count = process_team_category_from_backstage(
+                    args, team_name, category_name, category_data, team_config,
+                    jira_client, default_issue_type, priority, custom_fields_mapping
+                )
+
+                all_created_tickets.extend(created)
+                all_skipped_tickets.extend(skipped)
+                total_dry_run_count += dry_run_count
     
     return all_created_tickets, all_skipped_tickets, total_dry_run_count
 

@@ -1683,8 +1683,8 @@ def get_display_mode_info(is_dry_run, ticket_key):
     """Get the mode prefix and color for ticket display."""
     if is_dry_run:
         if ticket_key and ticket_key.startswith("simulated-"):
-            return f"[DRY RUN] Would create (simulated ID: {ticket_key})", Fore.BLUE
-        return "[DRY RUN] Would create", Fore.BLUE
+            return f"[DRY RUN] Would create (simulated ID: {ticket_key})", Fore.LIGHTBLUE_EX
+        return "[DRY RUN] Would create", Fore.LIGHTBLUE_EX
     else:
         # If we have a ticket_key, it means the ticket was created
         # Otherwise, we're about to create it
@@ -1704,7 +1704,7 @@ def display_categories(additional_fields):
     has_categories = False
     for field, value in additional_fields.items():
         if isinstance(value, str) and ',' in value:
-            print(f"{Fore.BLUE}  {field} Categories: {value}{Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLUE_EX}  {field} Categories: {value}{Style.RESET_ALL}")
             has_categories = True
     return has_categories
 
@@ -1723,11 +1723,11 @@ def display_ticket_details(key, summary, description, project_key, additional_fi
     if description:
         # Show full description in dry-run mode for better visibility
         if is_dry_run:
-            print(f"{Fore.BLUE}  Description: {description}{Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLUE_EX}  Description: {description}{Style.RESET_ALL}")
         else:
             # For actual creation, show truncated version to keep logs clean
             desc_preview = description[:200] + ('...' if len(description) > 200 else '')
-            print(f"{Fore.BLUE}  Description: {desc_preview}{Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLUE_EX}  Description: {desc_preview}{Style.RESET_ALL}")
     
     # Show epic information
     display_epic_info(additional_fields, is_dry_run)
@@ -2338,11 +2338,11 @@ def display_dry_run_summary(total_dry_run_count, all_created_tickets, issue_type
         
         print(f"\n{Fore.CYAN}=== SIMULATED TICKETS (Alphabetical) ==={Style.RESET_ALL}")
         for i, ticket in enumerate(sorted_tickets, 1):
-            print(f"{Fore.BLUE}{i}. {ticket.ticket_id}: {ticket.summary}{Style.RESET_ALL}")
+            print(f"{Fore.LIGHTBLUE_EX}{i}. {ticket.ticket_id}: {ticket.summary}{Style.RESET_ALL}")
         
         print(f"\n{Fore.CYAN}Simulated tickets for copy-paste:{Style.RESET_ALL}")
         ticket_ids = [t.ticket_id for t in sorted_tickets]
-        print(f"{Fore.BLUE}{','.join(ticket_ids)}{Style.RESET_ALL}")
+        print(f"{Fore.LIGHTBLUE_EX}{','.join(ticket_ids)}{Style.RESET_ALL}")
 
 def display_created_tickets(all_created_tickets):
     """Display detailed list of created tickets in alphabetical order."""
@@ -2610,7 +2610,7 @@ def collect_ticket_data_for_csv(df, default_issue_type, team_mapping, sheet_name
         tickets_data.append(ticket_dict)
         
         # Display what would be exported
-        print(f"{Fore.BLUE}Collecting ticket: '{summary}' for key '{key}' in project {team_project}{Style.RESET_ALL}")
+        print(f"{Fore.LIGHTBLUE_EX}Collecting ticket: '{summary}' for key '{key}' in project {team_project}{Style.RESET_ALL}")
     
     return tickets_data
 
@@ -2785,7 +2785,7 @@ def collect_ticket_data_from_backstage(team_name, category_name, category_data, 
     if 'Component' in team_config:
         ticket_dict['Component'] = team_config['Component']
     
-    print(f"{Fore.BLUE}Collected ticket: '{summary}' for project {project_key}{Style.RESET_ALL}")
+    print(f"{Fore.LIGHTBLUE_EX}Collected ticket: '{summary}' for project {project_key}{Style.RESET_ALL}")
     
     return ticket_dict
 

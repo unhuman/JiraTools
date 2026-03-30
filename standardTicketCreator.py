@@ -837,10 +837,24 @@ def analyze_quality_compliance(checks):
                 'track_name': track_name
             })
     
+    # Recalculate current_level based on ALL failing checks, not just SonarQube.
+    # If any L2 check is failing, the team hasn't achieved L2 (actual level is L1), etc.
+    failing_levels = {d['level_category'] for d in improvement_details}
+    level_order = ['L1', 'L2', 'L3', 'L4']
+    actual_level = 'L1'
+    for lvl in level_order:
+        if lvl in failing_levels:
+            # Can't have achieved this level or higher; actual level is the one before
+            idx = level_order.index(lvl)
+            actual_level = level_order[idx - 1] if idx > 0 else 'L0'
+            break
+        actual_level = lvl  # All checks at this level pass
+    current_level = actual_level
+
     # Determine max available level and improvement needed
     max_available_level = 'L4'
     improvement_needed = len(improvement_details) > 0
-    
+
     return {
         'current_level': current_level,
         'max_available_level': max_available_level,

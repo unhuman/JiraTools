@@ -646,7 +646,7 @@ async def async_process_repos(repos, check_filename, compiled_regex, team_name, 
         async with semaphore:
             progress = f"Team: {team_idx}/{total_teams} ({team_name}), App {repo_idx}/{total_repos_in_team}"
             log_lines.append(
-                f"  [{progress}] Cloning {Fore.BLUE}{repo_display}{Style.RESET_ALL} ..."
+                f"  [{progress}] Cloning {Fore.CYAN}{repo_display}{Style.RESET_ALL} ..."
             )
             content = await async_fetch_file_from_repo(git_url, check_filename, verbose=verbose, log_lines=log_lines)
             return repo_idx, git_url, repo_display, comp_names, content, log_lines
@@ -690,7 +690,7 @@ async def async_process_repos(repos, check_filename, compiled_regex, team_name, 
             captured = ", ".join(groups)
             results.append((team_name, repo_display) + groups)
             _log(f"    {Fore.GREEN}{team_name}{Style.RESET_ALL} | "
-                 f"{Fore.BLUE}{repo_display}{Style.RESET_ALL} | "
+                 f"{Fore.CYAN}{repo_display}{Style.RESET_ALL} | "
                  f"{captured}")
 
     return results, repos_permission_denied, repos_checked
@@ -1114,11 +1114,11 @@ def _create_compliance_tickets(args, config, results, version_dates):
                 failed.append(repo_display)
         else:
             simulated_counter += 1
-            print(f"  {Fore.BLUE}[DRY RUN] (simulated-{project_key}-{simulated_counter}) "
+            print(f"  {Fore.CYAN}[DRY RUN] (simulated-{project_key}-{simulated_counter}) "
                   f"{summary}{Style.RESET_ALL}")
             if description:
                 for line in description.splitlines():
-                    print(f"    {Fore.BLUE}{line}{Style.RESET_ALL}")
+                    print(f"    {Fore.YELLOW}{line}{Style.RESET_ALL}")
             created += 1
 
     # Ticket creation summary
@@ -1333,13 +1333,13 @@ async def async_main(args, config, backstage_url, compiled_regex, compare_repo, 
                 age_days = row[-1]
                 date_color = Fore.YELLOW if last_updated == "Unknown" else ""
                 print(f"  {Fore.GREEN}{team_name_r}{Style.RESET_ALL} | "
-                      f"{Fore.BLUE}{repo_display_r}{Style.RESET_ALL} | "
+                      f"{Fore.CYAN}{repo_display_r}{Style.RESET_ALL} | "
                       f"{captured_r} | "
                       f"{date_color}Last Updated: {last_updated} | Age: {age_days} days{Style.RESET_ALL}")
             else:
                 captured_r = ", ".join(row[2:])
                 print(f"  {Fore.GREEN}{team_name_r}{Style.RESET_ALL} | "
-                      f"{Fore.BLUE}{repo_display_r}{Style.RESET_ALL} | "
+                      f"{Fore.CYAN}{repo_display_r}{Style.RESET_ALL} | "
                       f"{captured_r}")
 
     # Summary

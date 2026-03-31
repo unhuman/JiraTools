@@ -2544,6 +2544,8 @@ def export_tickets_to_csv(csv_file, tickets_data, custom_fields_mapping=None):
     print(f"{Fore.GREEN}Files created: {len(exported_files)}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}CSV columns: {', '.join(csv_columns)}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}You can now import these files into Jira using: Project Settings > Import > CSV{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Alternatively, use Claude Code with a Jira MCP server to create tickets directly from these CSV files.{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}See README.md > 'Importing Tickets via Claude Code MCP' for details.{Style.RESET_ALL}")
 
 
 def collect_ticket_data_for_csv(df, default_issue_type, team_mapping, sheet_name, priority, custom_fields_mapping, excel_file, args):

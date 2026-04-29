@@ -57,9 +57,10 @@ def parse_arguments():
         help="CSV output prefix (generates {prefix}_raw.csv and {prefix}_aggregated.csv)"
     )
     parser.add_argument(
-        "--report",
+        "--filePrefix",
+        required=True,
         metavar="PREFIX",
-        help="PNG report prefix (generates per-team + overlay PNGs)"
+        help="File prefix for PNG output (generates {prefix}_{team}_overall.png)"
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -700,6 +701,9 @@ def main():
     team_map = {t.get('metadata', {}).get('name', ''): t for t in all_team_entities}
     team_map_lower = {name.lower(): (name, entity) for name, entity in team_map.items()}
 
+    # Excluded job title keywords (alphabetized)
+    excluded_keywords = ["Analyst", "Architect", "Director", "Product", "Program", "Project", "Scrum"]
+
     # Collect user queries
     user_queries = []
     for team_name in teams:
@@ -718,8 +722,13 @@ def main():
         print(f"{Fore.CYAN}Team: {actual_team_name} ({len(members)} member(s)){Style.RESET_ALL}")
 
         for member in members:
+            job_title = member.get('job_title', '')
+            # Skip if job title contains any excluded keywords (case-insensitive)
+            if any(keyword.lower() in job_title.lower() for keyword in excluded_keywords):
+                continue
+
             jql = build_jql_for_user(member['username'], date_clause)
-            user_queries.append((member['username'], member['display_name'], member.get('job_title', ''), actual_team_name, jql))
+            user_queries.append((member['username'], member['display_name'], job_title, actual_team_name, jql))
 
     if not user_queries:
         print(f"{Fore.RED}No users to query.{Style.RESET_ALL}")
@@ -767,14 +776,17 @@ def main():
         export_csv(raw_issues, agg_df, args.output, day_size=day_size)
 
     # Generate charts with cumulative data
-    if args.report:
+    if args.filePrefix:
         print(f"\n{Fore.CYAN}Generating charts...{Style.RESET_ALL}")
         cum_df = make_cumulative(agg_df)
-        for team_name in cum_df['team'].unique():
+        unique_teams = cum_df['team'].unique()
+        for team_name in unique_teams:
             team_df = cum_df[cum_df['team'] == team_name]
-            generate_team_chart(team_name, team_df, args.report, start_date, end_date)
-            generate_team_overall_report(team_name, team_df, args.report, start_date, end_date)
-        generate_overlay_chart(cum_df, args.report, start_date, end_date)
+            # generate_team_chart(team_name, team_df, args.filePrefix, start_date, end_date)
+            generate_team_overall_report(team_name, team_df, args.filePrefix, start_date, end_date)
+        # Only generate overlay if multiple teams
+        if len(unique_teams) > 1:
+            generate_overlay_chart(cum_df, args.filePrefix, start_date, end_date)
 
 
 if __name__ == "__main__":

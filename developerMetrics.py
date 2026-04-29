@@ -134,13 +134,14 @@ def build_jql_for_user(username, date_clause):
     return jql
 
 
-def query_user_issues(jira_client, username, display_name, team_name, jql):
+def query_user_issues(jira_client, username, display_name, job_title, team_name, jql):
     """Query issues for a single user.
 
     Args:
         jira_client: Jira client
         username: Jira assignee username
         display_name: Display name for reporting
+        job_title: Job title for reporting
         team_name: Team name for grouping
         jql: JQL query string
 
@@ -173,6 +174,7 @@ def query_user_issues(jira_client, username, display_name, team_name, jql):
                 'team': team_name,
                 'user': username,
                 'display_name': display_name,
+                'job_title': job_title,
                 'issue_key': issue.key,
                 'summary': getattr(issue.fields, 'summary', ''),
                 'resolved_date': resolved_date,
@@ -204,6 +206,11 @@ def aggregate_to_weekly(df, day_size=6):
         issue_count=('issue_key', 'count'),
         total_estimate_seconds=('original_estimate_seconds', 'sum'),
     ).reset_index()
+
+    # Preserve job_title if present in original df
+    if 'job_title' in df.columns:
+        job_title_map = df.groupby('user')['job_title'].first()
+        agg['job_title'] = agg['user'].map(job_title_map).fillna('')
 
     agg['total_estimate_days'] = (agg['total_estimate_seconds'] / (day_size * 3600)).round(2)
     agg['total_estimate_weeks'] = (agg['total_estimate_days'] / 5).round(2)
@@ -497,17 +504,19 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
 
         user_df = team_df[team_df['user'] == user].sort_values('week_start')
         display_name = user_df['display_name'].iloc[0]
+        job_title = user_df['job_title'].iloc[0] if 'job_title' in user_df.columns else ''
 
         ax_issues.plot(user_df['week_start'], user_df['issue_count'], marker='o', color='#06A77D', linewidth=1.5, markersize=4)
         ax_issues.fill_between(user_df['week_start'], user_df['issue_count'], alpha=0.15, color='#06A77D')
-        ax_issues.set_title(f"{display_name} — Issues", fontsize=9, fontweight='bold')
+        title_prefix = f"{display_name} ({job_title})" if job_title else display_name
+        ax_issues.set_title(f"{title_prefix} — Issues", fontsize=9, fontweight='bold')
         ax_issues.set_ylabel('Count', fontsize=8)
         ax_issues.grid(True, alpha=0.2)
         ax_issues.yaxis.set_major_locator(MaxNLocator(integer=True))
 
         ax_estimate.plot(user_df['week_start'], user_df['total_estimate_weeks'], marker='o', color='#F18F01', linewidth=1.5, markersize=4)
         ax_estimate.fill_between(user_df['week_start'], user_df['total_estimate_weeks'], alpha=0.15, color='#F18F01')
-        ax_estimate.set_title(f"{display_name} — Estimate (weeks)", fontsize=9, fontweight='bold')
+        ax_estimate.set_title(f"{title_prefix} — Estimate (weeks)", fontsize=9, fontweight='bold')
         ax_estimate.set_ylabel('Weeks', fontsize=8)
         ax_estimate.grid(True, alpha=0.2)
 
@@ -710,7 +719,7 @@ def main():
 
         for member in members:
             jql = build_jql_for_user(member['username'], date_clause)
-            user_queries.append((member['username'], member['display_name'], actual_team_name, jql))
+            user_queries.append((member['username'], member['display_name'], member.get('job_title', ''), actual_team_name, jql))
 
     if not user_queries:
         print(f"{Fore.RED}No users to query.{Style.RESET_ALL}")
@@ -724,8 +733,8 @@ def main():
 
     with ThreadPoolExecutor(max_workers=args.parallel) as executor:
         futures = {
-            executor.submit(query_user_issues, jira_client, username, display_name, team_name, jql): (username, display_name, team_name)
-            for username, display_name, team_name, jql in user_queries
+            executor.submit(query_user_issues, jira_client, username, display_name, job_title, team_name, jql): (username, display_name, team_name)
+            for username, display_name, job_title, team_name, jql in user_queries
         }
 
         for future in as_completed(futures):

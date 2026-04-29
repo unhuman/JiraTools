@@ -145,7 +145,7 @@ def get_team_components(backstage_url: str, team_name: str, timeout: int = 30) -
 
 def get_user_info(backstage_url: str, user_ref: str, timeout: int = 30) -> Dict:
     """
-    Fetch display name and email for a Backstage user.
+    Fetch display name, email, and job title for a Backstage user.
 
     Args:
         backstage_url: Base URL for Backstage instance
@@ -153,7 +153,7 @@ def get_user_info(backstage_url: str, user_ref: str, timeout: int = 30) -> Dict:
         timeout: Request timeout in seconds
 
     Returns:
-        Dict with keys: 'username' (bare username), 'display_name', 'email'
+        Dict with keys: 'username' (bare username), 'display_name', 'email', 'job_title'
     """
     user_ref_lower = user_ref.lower()
     namespace = 'default'
@@ -174,22 +174,28 @@ def get_user_info(backstage_url: str, user_ref: str, timeout: int = 30) -> Dict:
         response.raise_for_status()
 
         entity = response.json()
-        profile = entity.get('metadata', {}).get('profile', {})
+        metadata = entity.get('metadata', {})
+        profile = metadata.get('profile', {})
         spec_profile = entity.get('spec', {}).get('profile', {})
 
         display_name = profile.get('displayName') or spec_profile.get('displayName') or username
         email = profile.get('email') or spec_profile.get('email') or ''
+        # Job title can be in role field or description field
+        job_title = (profile.get('role') or spec_profile.get('role') or
+                    metadata.get('description') or '')
 
         return {
             'username': username,
             'display_name': display_name,
             'email': email,
+            'job_title': job_title,
         }
     except requests.exceptions.RequestException as e:
         return {
             'username': username,
             'display_name': username,
             'email': '',
+            'job_title': '',
         }
 
 
@@ -203,7 +209,7 @@ def get_team_members(backstage_url: str, team: Dict, timeout: int = 30) -> List[
         timeout: Request timeout in seconds
 
     Returns:
-        List of dicts with keys: 'username', 'display_name', 'email'
+        List of dicts with keys: 'username', 'display_name', 'email', 'job_title'
     """
     members = team.get('spec', {}).get('members', [])
     result = []

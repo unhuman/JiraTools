@@ -49,7 +49,7 @@ def parse_arguments():
     parser.add_argument(
         "--period",
         required=True,
-        help="Time period: 'ytd' (year to date), 'month' (current month), or 'Nm' (e.g., '3m', '6m' for last N months)"
+        help="Time period: 'ytd', 'month', 'Nm' (e.g., '3m', '6m'), or 'YYYY-MM-DD:YYYY-MM-DD' for an explicit range"
     )
     parser.add_argument(
         "-o", "--output",
@@ -77,20 +77,21 @@ def parse_arguments():
 
 
 def parse_period(period_str):
-    """Parse period string into (jql_date_clause, start_date_for_charts).
+    """Parse period string into (lower_clause, start_date, upper_clause, end_date).
 
     Args:
-        period_str: 'ytd', 'month', or 'Nm' (e.g., '3m', '6m')
+        period_str: 'ytd', 'month', 'Nm' (e.g., '3m', '6m'), or 'YYYY-MM-DD:YYYY-MM-DD'
 
     Returns:
-        Tuple of (jql_date_clause, start_date)
+        Tuple of (lower_clause, start_date, upper_clause, end_date)
+        For open-ended modes, upper_clause and end_date are None
     """
     today = datetime.now()
 
     if period_str == 'ytd':
-        return ">= startOfYear()", datetime(today.year, 1, 1)
+        return ">= startOfYear()", datetime(today.year, 1, 1), None, None
     elif period_str == 'month':
-        return ">= startOfMonth()", datetime(today.year, today.month, 1)
+        return ">= startOfMonth()", datetime(today.year, today.month, 1), None, None
     elif period_str.endswith('m'):
         try:
             months = int(period_str[:-1])
@@ -98,21 +99,35 @@ def parse_period(period_str):
             days_back = months * 30
             start_date = today - timedelta(days=days_back)
             jql_date = start_date.strftime("%Y-%m-%d")
-            return f'>= {jql_date}', start_date
+            return f'>= {jql_date}', start_date, None, None
         except ValueError:
-            print(f"{Fore.RED}Error: Invalid period '{period_str}'. Use 'ytd', 'month', or 'Nm' (e.g., '3m'){Style.RESET_ALL}")
-            return None, None
+            print(f"{Fore.RED}Error: Invalid period '{period_str}'. Use 'ytd', 'month', 'Nm' (e.g., '3m'), or 'YYYY-MM-DD:YYYY-MM-DD'{Style.RESET_ALL}")
+            return None, None, None, None
+    elif ':' in period_str:
+        try:
+            parts = period_str.split(':')
+            if len(parts) != 2:
+                raise ValueError("Date range must have exactly one colon")
+            start_date = datetime.strptime(parts[0].strip(), "%Y-%m-%d")
+            end_date = datetime.strptime(parts[1].strip(), "%Y-%m-%d")
+            start_str = parts[0].strip()
+            end_str = parts[1].strip()
+            return f'>= {start_str}', start_date, f'<= {end_str}', end_date
+        except (ValueError, IndexError) as e:
+            print(f"{Fore.RED}Error: Invalid date range '{period_str}'. Use 'YYYY-MM-DD:YYYY-MM-DD' format. {e}{Style.RESET_ALL}")
+            return None, None, None, None
     else:
-        print(f"{Fore.RED}Error: Invalid period '{period_str}'. Use 'ytd', 'month', or 'Nm' (e.g., '3m'){Style.RESET_ALL}")
-        return None, None
+        print(f"{Fore.RED}Error: Invalid period '{period_str}'. Use 'ytd', 'month', 'Nm' (e.g., '3m'), or 'YYYY-MM-DD:YYYY-MM-DD'{Style.RESET_ALL}")
+        return None, None, None, None
 
 
-def build_jql_for_user(username, date_clause):
+def build_jql_for_user(username, date_clause, upper_date_clause=None):
     """Build JQL query for a user's completed work.
 
     Args:
         username: Jira assignee username
-        date_clause: Date filter clause (e.g., "AFTER startOfYear()")
+        date_clause: Lower date filter clause (e.g., ">= startOfYear()" or ">= 2026-01-01")
+        upper_date_clause: Optional upper date filter clause (e.g., "<= 2026-03-31")
 
     Returns:
         JQL query string
@@ -125,12 +140,24 @@ def build_jql_for_user(username, date_clause):
     ]
     status_list = ", ".join(f'"{s}"' for s in statuses)
 
+    updated_filter = f'updated {date_clause}'
+    if upper_date_clause:
+        updated_filter += f' AND updated {upper_date_clause}'
+
+    if upper_date_clause:
+        res_filter = (
+            f'(resolutiondate is EMPTY OR '
+            f'(resolutiondate {date_clause} AND resolutiondate {upper_date_clause}))'
+        )
+    else:
+        res_filter = f'(resolutiondate is EMPTY OR resolutiondate {date_clause})'
+
     jql = (
         f'Assignee = "{username}" '
         'AND issuetype not in (subTaskIssueTypes(), Epic, "Test Case Execution", "Test Execution", Test, DBCR) '
         f'AND status IN ({status_list}) '
-        f'AND updated {date_clause} '
-        f'AND (resolutiondate is EMPTY OR resolutiondate {date_clause}) '
+        f'AND {updated_filter} '
+        f'AND {res_filter} '
         'ORDER BY resolved DESC'
     )
     return jql
@@ -654,11 +681,11 @@ def main():
     args = parse_arguments()
     args.parallel = max(1, min(15, args.parallel))
 
-    date_clause, start_date = parse_period(args.period)
+    date_clause, start_date, upper_date_clause, explicit_end_date = parse_period(args.period)
     if date_clause is None:
         sys.exit(1)
 
-    end_date = datetime.now()
+    end_date = explicit_end_date or datetime.now()
 
     config = load_config()
     backstage_url = get_backstage_url(config, args.backstageUrl)
@@ -735,7 +762,7 @@ def main():
             if any(keyword.lower() in job_title.lower() for keyword in excluded_keywords):
                 continue
 
-            jql = build_jql_for_user(member['username'], date_clause)
+            jql = build_jql_for_user(member['username'], date_clause, upper_date_clause)
             user_queries.append((member['username'], member['display_name'], job_title, actual_team_name, jql))
 
     if not user_queries:

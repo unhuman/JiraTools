@@ -6,6 +6,7 @@ Useful Stuff for working with Jira
 | Script | Description | Docs |
 |--------|-------------|------|
 | `codeAudit.py` | Audits code across team repositories via Backstage + git sparse checkout + regex; optional version compliance checking via `--compare-repo` and automatic Jira ticket creation via `--createTickets` | [docs/codeAudit.md](docs/codeAudit.md) |
+| `developerMetrics.py` | Audits developer productivity across teams by fetching completed work from Jira, aggregating by week, and generating CSV reports + PNG visualizations; supports fixed periods (ytd, month, Nm) or custom date ranges | [docs/developerMetrics.md](docs/developerMetrics.md) |
 | `epicPlanner.py` | Orders work in an epic based on ticket dependencies | [docs/epicPlanner.md](docs/epicPlanner.md) |
 | `epicStatus.py` | Reports on the plan status of an epic by sprint | [docs/epicStatus.md](docs/epicStatus.md) |
 | `epicCreationTime.py` | Analyzes development time spans of open epics | [docs/epicCreationTime.md](docs/epicCreationTime.md) |

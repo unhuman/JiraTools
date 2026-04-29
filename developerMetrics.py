@@ -339,11 +339,23 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
     # Team total chart
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
 
-    team_total = team_df.groupby('week_start').agg({
-        'issue_count': 'sum',
-        'total_estimate_weeks': 'sum'
-    }).reset_index()
-    team_total = team_total.sort_values('week_start')
+    # Convert cumulative per-user data back to incremental, then sum and re-cumulate
+    incremental = []
+    for user in team_df['user'].unique():
+        user_df = team_df[team_df['user'] == user].sort_values('week_start').copy()
+        user_df['issue_count_inc'] = user_df['issue_count'].diff().fillna(user_df['issue_count'])
+        user_df['total_estimate_weeks_inc'] = user_df['total_estimate_weeks'].diff().fillna(user_df['total_estimate_weeks'])
+        incremental.append(user_df[['week_start', 'issue_count_inc', 'total_estimate_weeks_inc']])
+
+    inc_df = pd.concat(incremental, ignore_index=True)
+    team_total = inc_df.groupby('week_start').agg({
+        'issue_count_inc': 'sum',
+        'total_estimate_weeks_inc': 'sum'
+    }).reset_index().sort_values('week_start')
+
+    # Re-cumulate to get team total cumulative
+    team_total['issue_count'] = team_total['issue_count_inc'].cumsum()
+    team_total['total_estimate_weeks'] = team_total['total_estimate_weeks_inc'].cumsum()
 
     ax1.plot(team_total['week_start'], team_total['issue_count'], marker='o', color='#2E86AB', linewidth=2.5, markersize=6)
     ax1.fill_between(team_total['week_start'], team_total['issue_count'], alpha=0.3, color='#2E86AB')
@@ -373,6 +385,147 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
     plt.savefig(total_file, dpi=100, bbox_inches='tight')
     plt.close()
     print(f"{Fore.GREEN}Generated {total_file}{Style.RESET_ALL}")
+
+
+def generate_team_overall_report(team_name, team_df, report_prefix, start_date, end_date):
+    """Generate a comprehensive single-page team report with team totals, individuals combined, then individual breakdowns.
+
+    Args:
+        team_name: Team name
+        team_df: Cumulative DataFrame filtered to this team
+        report_prefix: PNG prefix
+        start_date: Report start date
+        end_date: Report end date
+    """
+    if team_df.empty:
+        return
+
+    team_df = team_df.copy()
+    team_df['week_start'] = pd.to_datetime(team_df['week_start'])
+
+    # Get sorted list of developers
+    developers = sorted(team_df['user'].unique())
+    num_developers = len(developers)
+
+    # Grid layout: 1 row per section (team, combined, + one per dev)
+    # Use height_ratios to make team/combined proportionally taller
+    total_rows = 2 + num_developers
+    height_ratios = [2.5, 2.5] + [1] * num_developers
+
+    # Physical height: team + combined at 3.5 inches each, devs at 2 inches each
+    fig_height = 3.5 + 3.5 + (num_developers * 2.0)
+    fig = plt.figure(figsize=(14, fig_height), constrained_layout=True)
+
+    # Create grid with height ratios (no manual hspace/wspace needed)
+    gs = fig.add_gridspec(total_rows, 2, height_ratios=height_ratios, wspace=0.3)
+
+    # Calculate team total
+    incremental = []
+    for user in team_df['user'].unique():
+        user_df = team_df[team_df['user'] == user].sort_values('week_start').copy()
+        user_df['issue_count_inc'] = user_df['issue_count'].diff().fillna(user_df['issue_count'])
+        user_df['total_estimate_weeks_inc'] = user_df['total_estimate_weeks'].diff().fillna(user_df['total_estimate_weeks'])
+        incremental.append(user_df[['week_start', 'issue_count_inc', 'total_estimate_weeks_inc']])
+
+    inc_df = pd.concat(incremental, ignore_index=True)
+    team_total = inc_df.groupby('week_start').agg({
+        'issue_count_inc': 'sum',
+        'total_estimate_weeks_inc': 'sum'
+    }).reset_index().sort_values('week_start')
+
+    team_total['issue_count'] = team_total['issue_count_inc'].cumsum()
+    team_total['total_estimate_weeks'] = team_total['total_estimate_weeks_inc'].cumsum()
+
+    # Team totals section (row 0)
+    ax_team_issues = fig.add_subplot(gs[0, 0])
+    ax_team_estimate = fig.add_subplot(gs[0, 1])
+
+    ax_team_issues.plot(team_total['week_start'], team_total['issue_count'], marker='o', color='#2E86AB', linewidth=2, markersize=5)
+    ax_team_issues.fill_between(team_total['week_start'], team_total['issue_count'], alpha=0.2, color='#2E86AB')
+    ax_team_issues.set_title(f"{team_name} — Team Total Issue Count", fontsize=10, fontweight='bold')
+    ax_team_issues.set_ylabel('Issues', fontsize=9)
+    ax_team_issues.grid(True, alpha=0.3)
+    ax_team_issues.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax_team_estimate.plot(team_total['week_start'], team_total['total_estimate_weeks'], marker='o', color='#A23B72', linewidth=2, markersize=5)
+    ax_team_estimate.fill_between(team_total['week_start'], team_total['total_estimate_weeks'], alpha=0.2, color='#A23B72')
+    ax_team_estimate.set_title(f"{team_name} — Team Total Estimate (weeks)", fontsize=10, fontweight='bold')
+    ax_team_estimate.set_ylabel('Weeks', fontsize=9)
+    ax_team_estimate.grid(True, alpha=0.3)
+
+    # Format team total x-axes
+    for ax in [ax_team_issues, ax_team_estimate]:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
+        ax.tick_params(axis='y', labelsize=8)
+
+    # Combined individuals section (row 1)
+    ax_ind_issues = fig.add_subplot(gs[1, 0])
+    ax_ind_estimate = fig.add_subplot(gs[1, 1])
+
+    for user in developers:
+        user_df = team_df[team_df['user'] == user].sort_values('week_start')
+        display_name = user_df['display_name'].iloc[0]
+        ax_ind_issues.plot(user_df['week_start'], user_df['issue_count'], marker='o', label=display_name, linewidth=1.5)
+        ax_ind_estimate.plot(user_df['week_start'], user_df['total_estimate_weeks'], marker='o', label=display_name, linewidth=1.5)
+
+    ax_ind_issues.set_title(f"{team_name} — All Developers - Cumulative Issues", fontsize=10, fontweight='bold')
+    ax_ind_issues.set_ylabel('Issues', fontsize=9)
+    ax_ind_issues.legend(loc='best', fontsize=8)
+    ax_ind_issues.grid(True, alpha=0.3)
+    ax_ind_issues.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax_ind_estimate.set_title(f"{team_name} — All Developers - Cumulative Estimate", fontsize=10, fontweight='bold')
+    ax_ind_estimate.set_ylabel('Estimate (weeks)', fontsize=9)
+    ax_ind_estimate.legend(loc='best', fontsize=8)
+    ax_ind_estimate.grid(True, alpha=0.3)
+
+    # Format combined individuals x-axes
+    for ax in [ax_ind_issues, ax_ind_estimate]:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
+        ax.tick_params(axis='y', labelsize=8)
+
+    # Plot individual developer breakdowns (rows 2+)
+    dev_start_row = 2
+    for idx, user in enumerate(developers):
+        row = dev_start_row + idx
+        ax_issues = fig.add_subplot(gs[row, 0])
+        ax_estimate = fig.add_subplot(gs[row, 1])
+
+        user_df = team_df[team_df['user'] == user].sort_values('week_start')
+        display_name = user_df['display_name'].iloc[0]
+
+        ax_issues.plot(user_df['week_start'], user_df['issue_count'], marker='o', color='#06A77D', linewidth=1.5, markersize=4)
+        ax_issues.fill_between(user_df['week_start'], user_df['issue_count'], alpha=0.15, color='#06A77D')
+        ax_issues.set_title(f"{display_name} — Issues", fontsize=9, fontweight='bold')
+        ax_issues.set_ylabel('Count', fontsize=8)
+        ax_issues.grid(True, alpha=0.2)
+        ax_issues.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+        ax_estimate.plot(user_df['week_start'], user_df['total_estimate_weeks'], marker='o', color='#F18F01', linewidth=1.5, markersize=4)
+        ax_estimate.fill_between(user_df['week_start'], user_df['total_estimate_weeks'], alpha=0.15, color='#F18F01')
+        ax_estimate.set_title(f"{display_name} — Estimate (weeks)", fontsize=9, fontweight='bold')
+        ax_estimate.set_ylabel('Weeks', fontsize=8)
+        ax_estimate.grid(True, alpha=0.2)
+
+        # Format x-axis for individual subplots
+        for ax in [ax_issues, ax_estimate]:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+            ax.xaxis.set_major_locator(mdates.MonthLocator())
+            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
+            ax.tick_params(axis='y', labelsize=8)
+
+    weeks = (end_date.date() - start_date.date()).days // 7 + 1
+    fig.text(0.99, 0.01, f"Period: {start_date.date()} to {end_date.date()} | {weeks} weeks",
+             ha='right', va='bottom', fontsize=8, style='italic')
+
+    overall_file = f"{report_prefix}_{team_name}_overall.png"
+    plt.savefig(overall_file, dpi=100, bbox_inches='tight')
+    plt.close()
+    print(f"{Fore.GREEN}Generated {overall_file}{Style.RESET_ALL}")
 
 
 def generate_overlay_chart(agg_df, report_prefix, start_date, end_date):
@@ -611,6 +764,7 @@ def main():
         for team_name in cum_df['team'].unique():
             team_df = cum_df[cum_df['team'] == team_name]
             generate_team_chart(team_name, team_df, args.report, start_date, end_date)
+            generate_team_overall_report(team_name, team_df, args.report, start_date, end_date)
         generate_overlay_chart(cum_df, args.report, start_date, end_date)
 
 

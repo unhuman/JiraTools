@@ -702,7 +702,7 @@ def main():
     team_map_lower = {name.lower(): (name, entity) for name, entity in team_map.items()}
 
     # Excluded job title keywords (alphabetized)
-    excluded_keywords = ["Analyst", "Architect", "Director", "Product", "Program", "Project", "Scrum"]
+    excluded_keywords = ["Analyst", "Architect", "Director", "Manager", "Product", "Program", "Project", "Scrum"]
 
     # Collect user queries
     user_queries = []

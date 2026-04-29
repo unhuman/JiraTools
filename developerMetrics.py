@@ -1,0 +1,568 @@
+#!/usr/bin/env python3
+"""
+Developer Metrics Script
+
+Audits developer productivity across teams by fetching completed work from Jira,
+aggregating by week, and generating CSV reports + PNG visualizations.
+
+Usage:
+    python developerMetrics.py --teams TeamA --period ytd --output results.csv --report charts
+
+Requirements:
+    pip install aiohttp colorama jira matplotlib pandas openpyxl requests
+"""
+
+import argparse
+import csv
+from datetime import datetime, timedelta
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys
+
+import jira
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.ticker import MaxNLocator
+import requests
+from colorama import init, Fore, Style
+
+from libraries.jiraToolsConfig import load_config, get_backstage_url
+from libraries.backstageTools import get_all_teams, get_team_members
+from libraries.jiraQueryTools import search_issues
+
+
+def parse_arguments():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Audit developer productivity across teams using Backstage and Jira."
+    )
+    parser.add_argument(
+        "--teams",
+        required=True,
+        help="Comma-separated list of team names, 'org' / '*' / 'all' to use teams from config, or 'all' to audit all teams in Backstage"
+    )
+    parser.add_argument(
+        "--backstageUrl",
+        help="Backstage base URL (overrides backstageUrl in ~/.jiraTools config)"
+    )
+    parser.add_argument(
+        "--period",
+        required=True,
+        help="Time period: 'ytd' (year to date), 'month' (current month), or 'Nm' (e.g., '3m', '6m' for last N months)"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        metavar="PREFIX",
+        help="CSV output prefix (generates {prefix}_raw.csv and {prefix}_aggregated.csv)"
+    )
+    parser.add_argument(
+        "--report",
+        metavar="PREFIX",
+        help="PNG report prefix (generates per-team + overlay PNGs)"
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Show detailed logging for debugging"
+    )
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=5,
+        help="Number of parallel workers for Jira queries (default: 5, max: 15)"
+    )
+    return parser.parse_args()
+
+
+def parse_period(period_str):
+    """Parse period string into (jql_date_clause, start_date_for_charts).
+
+    Args:
+        period_str: 'ytd', 'month', or 'Nm' (e.g., '3m', '6m')
+
+    Returns:
+        Tuple of (jql_date_clause, start_date)
+    """
+    today = datetime.now()
+
+    if period_str == 'ytd':
+        return "AFTER startOfYear()", datetime(today.year, 1, 1)
+    elif period_str == 'month':
+        return "AFTER startOfMonth()", datetime(today.year, today.month, 1)
+    elif period_str.endswith('m'):
+        try:
+            months = int(period_str[:-1])
+            # Calculate date N months ago (approximate: N * 30 days)
+            days_back = months * 30
+            start_date = today - timedelta(days=days_back)
+            jql_date = start_date.strftime("%Y-%m-%d")
+            return f'AFTER {jql_date}', start_date
+        except ValueError:
+            print(f"{Fore.RED}Error: Invalid period '{period_str}'. Use 'ytd', 'month', or 'Nm' (e.g., '3m'){Style.RESET_ALL}")
+            return None, None
+    else:
+        print(f"{Fore.RED}Error: Invalid period '{period_str}'. Use 'ytd', 'month', or 'Nm' (e.g., '3m'){Style.RESET_ALL}")
+        return None, None
+
+
+def build_jql_for_user(username, date_clause):
+    """Build JQL query for a user's completed work.
+
+    Args:
+        username: Jira assignee username
+        date_clause: Date filter clause (e.g., "AFTER startOfYear()")
+
+    Returns:
+        JQL query string
+    """
+    statuses = [
+        "Acceptance", "Approved to Deploy", "Certified", "Closed",
+        "Complete", "Completed", "Deployed", "Done", "Released",
+        "Ready for Deployment", "Ready For Release", "Ready to Deploy",
+        "Ready to Release", "Resolved"
+    ]
+    status_list = ", ".join(f'"{s}"' for s in statuses)
+
+    jql = (
+        f'Assignee = "{username}" '
+        'AND issuetype not in (subTaskIssueTypes(), Epic, "Test Case Execution", "Test Execution", Test, DBCR) '
+        f'AND status IN ({status_list}) '
+        f'AND (status CHANGED TO ({status_list}) {date_clause}) '
+        'ORDER BY resolved DESC'
+    )
+    return jql
+
+
+def query_user_issues(jira_client, username, display_name, team_name, jql):
+    """Query issues for a single user.
+
+    Args:
+        jira_client: Jira client
+        username: Jira assignee username
+        display_name: Display name for reporting
+        team_name: Team name for grouping
+        jql: JQL query string
+
+    Returns:
+        List of issue dicts
+    """
+    issues = []
+    try:
+        fields = ['summary', 'resolutiondate', 'timeoriginalestimate', 'issuetype', 'assignee']
+        results = search_issues(jira_client, jql, max_results=False, fields=fields)
+
+        for issue in results:
+            resolved_date_str = getattr(issue.fields, 'resolutiondate', None)
+            resolved_date = None
+            if resolved_date_str:
+                try:
+                    resolved_date = datetime.strptime(resolved_date_str[:10], "%Y-%m-%d").date()
+                except (ValueError, AttributeError, TypeError):
+                    pass
+
+            if not resolved_date:
+                continue
+
+            original_estimate_seconds = getattr(issue.fields, 'timeoriginalestimate', None) or 0
+
+            issue_type_obj = getattr(issue.fields, 'issuetype', None)
+            issue_type_name = issue_type_obj.name if issue_type_obj else ''
+
+            issues.append({
+                'team': team_name,
+                'user': username,
+                'display_name': display_name,
+                'issue_key': issue.key,
+                'summary': getattr(issue.fields, 'summary', ''),
+                'resolved_date': resolved_date,
+                'original_estimate_seconds': original_estimate_seconds,
+                'issue_type': issue_type_name,
+            })
+    except Exception as e:
+        print(f"{Fore.YELLOW}Warning: Error querying issues for {username}: {e}{Style.RESET_ALL}")
+
+    return issues
+
+
+def aggregate_to_weekly(df):
+    """Aggregate issue data to weekly buckets.
+
+    Args:
+        df: DataFrame with resolved_date and original_estimate_seconds columns
+
+    Returns:
+        Aggregated DataFrame
+    """
+    if df.empty:
+        return pd.DataFrame()
+
+    df['week_start'] = df['resolved_date'] - pd.to_timedelta(df['resolved_date'].dt.weekday, unit='D')
+
+    agg = df.groupby(['team', 'user', 'display_name', 'week_start']).agg(
+        issue_count=('issue_key', 'count'),
+        total_estimate_seconds=('original_estimate_seconds', 'sum'),
+    ).reset_index()
+
+    agg['total_estimate_days'] = (agg['total_estimate_seconds'] / 86400).round(2)
+    agg = agg.drop(columns=['total_estimate_seconds'])
+
+    return agg.sort_values(['team', 'user', 'week_start'])
+
+
+def export_csv(raw_issues, agg_df, output_prefix):
+    """Export raw and aggregated data to CSV files.
+
+    Args:
+        raw_issues: List of raw issue dicts
+        agg_df: Aggregated DataFrame
+        output_prefix: Output file prefix
+    """
+    raw_file = f"{output_prefix}_raw.csv"
+    agg_file = f"{output_prefix}_aggregated.csv"
+
+    # Raw CSV
+    with open(raw_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            'Team', 'User', 'Display Name', 'Issue Key', 'Summary',
+            'Resolved Date', 'Original Estimate (days)', 'Issue Type'
+        ])
+        for issue in raw_issues:
+            estimate_days = round(issue['original_estimate_seconds'] / 86400, 2)
+            writer.writerow([
+                issue['team'],
+                issue['user'],
+                issue['display_name'],
+                issue['issue_key'],
+                issue['summary'],
+                issue['resolved_date'],
+                estimate_days,
+                issue['issue_type'],
+            ])
+
+    print(f"{Fore.GREEN}Raw results exported to {raw_file}{Style.RESET_ALL}")
+
+    # Aggregated CSV
+    if not agg_df.empty:
+        agg_df_sorted = agg_df.sort_values(['team', 'user', 'week_start'])
+        agg_df_sorted['Week Start'] = agg_df_sorted['week_start'].dt.strftime('%Y-%m-%d')
+        agg_df_sorted[['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_days']].to_csv(
+            agg_file, index=False,
+            header=['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (days)']
+        )
+        print(f"{Fore.GREEN}Aggregated results exported to {agg_file}{Style.RESET_ALL}")
+
+
+def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date):
+    """Generate two PNG files for a team: individuals and total.
+
+    Args:
+        team_name: Team name
+        team_df: Aggregated DataFrame filtered to this team
+        report_prefix: PNG prefix
+        start_date: Report start date
+        end_date: Report end date
+    """
+    if team_df.empty:
+        return
+
+    # Convert week_start to datetime for plotting
+    team_df = team_df.copy()
+    team_df['week_start'] = pd.to_datetime(team_df['week_start'])
+
+    # Individual chart
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+
+    for user in team_df['user'].unique():
+        user_df = team_df[team_df['user'] == user].sort_values('week_start')
+        display_name = user_df['display_name'].iloc[0]
+        ax1.plot(user_df['week_start'], user_df['issue_count'], marker='o', label=display_name, linewidth=2)
+        ax2.plot(user_df['week_start'], user_df['total_estimate_days'], marker='o', label=display_name, linewidth=2)
+
+    ax1.set_title(f"{team_name} — Issue Count by Week", fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Issue Count', fontsize=10)
+    ax1.legend(loc='best', fontsize=9)
+    ax1.grid(True, alpha=0.3)
+    ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax2.set_title(f"{team_name} — Original Estimate (days) by Week", fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Week of', fontsize=10)
+    ax2.set_ylabel('Estimate (days)', fontsize=10)
+    ax2.legend(loc='best', fontsize=9)
+    ax2.grid(True, alpha=0.3)
+
+    for ax in [ax1, ax2]:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+    weeks = (end_date.date() - start_date.date()).days // 7 + 1
+    fig.text(0.99, 0.01, f"Period: {start_date.date()} to {end_date.date()} | {weeks} weeks",
+             ha='right', va='bottom', fontsize=9, style='italic')
+
+    plt.tight_layout(rect=[0, 0.02, 1, 1])
+    individuals_file = f"{report_prefix}_{team_name}_individuals.png"
+    plt.savefig(individuals_file, dpi=100, bbox_inches='tight')
+    plt.close()
+    print(f"{Fore.GREEN}Generated {individuals_file}{Style.RESET_ALL}")
+
+    # Team total chart
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+
+    team_total = team_df.groupby('week_start').agg({
+        'issue_count': 'sum',
+        'total_estimate_days': 'sum'
+    }).reset_index()
+    team_total = team_total.sort_values('week_start')
+
+    ax1.plot(team_total['week_start'], team_total['issue_count'], marker='o', color='#2E86AB', linewidth=2.5, markersize=6)
+    ax1.fill_between(team_total['week_start'], team_total['issue_count'], alpha=0.3, color='#2E86AB')
+    ax1.set_title(f"{team_name} — Issue Count by Week (Team Total)", fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Issue Count', fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax2.plot(team_total['week_start'], team_total['total_estimate_days'], marker='o', color='#A23B72', linewidth=2.5, markersize=6)
+    ax2.fill_between(team_total['week_start'], team_total['total_estimate_days'], alpha=0.3, color='#A23B72')
+    ax2.set_title(f"{team_name} — Original Estimate (days) by Week (Team Total)", fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Week of', fontsize=10)
+    ax2.set_ylabel('Estimate (days)', fontsize=10)
+    ax2.grid(True, alpha=0.3)
+
+    for ax in [ax1, ax2]:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+    weeks = (end_date.date() - start_date.date()).days // 7 + 1
+    fig.text(0.99, 0.01, f"Period: {start_date.date()} to {end_date.date()} | {weeks} weeks",
+             ha='right', va='bottom', fontsize=9, style='italic')
+
+    plt.tight_layout(rect=[0, 0.02, 1, 1])
+    total_file = f"{report_prefix}_{team_name}_total.png"
+    plt.savefig(total_file, dpi=100, bbox_inches='tight')
+    plt.close()
+    print(f"{Fore.GREEN}Generated {total_file}{Style.RESET_ALL}")
+
+
+def generate_overlay_chart(agg_df, report_prefix, start_date, end_date):
+    """Generate overlay chart showing all teams.
+
+    Args:
+        agg_df: Full aggregated DataFrame
+        report_prefix: PNG prefix
+        start_date: Report start date
+        end_date: Report end date
+    """
+    if agg_df.empty:
+        return
+
+    agg_df = agg_df.copy()
+    agg_df['week_start'] = pd.to_datetime(agg_df['week_start'])
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+
+    for team in agg_df['team'].unique():
+        team_df = agg_df[agg_df['team'] == team].groupby('week_start').agg({
+            'issue_count': 'sum',
+            'total_estimate_days': 'sum'
+        }).reset_index().sort_values('week_start')
+
+        ax1.plot(team_df['week_start'], team_df['issue_count'], marker='o', label=team, linewidth=2)
+        ax2.plot(team_df['week_start'], team_df['total_estimate_days'], marker='o', label=team, linewidth=2)
+
+    ax1.set_title("All Teams — Issue Count by Week", fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Issue Count', fontsize=10)
+    ax1.legend(loc='best', fontsize=9)
+    ax1.grid(True, alpha=0.3)
+    ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax2.set_title("All Teams — Original Estimate (days) by Week", fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Week of', fontsize=10)
+    ax2.set_ylabel('Estimate (days)', fontsize=10)
+    ax2.legend(loc='best', fontsize=9)
+    ax2.grid(True, alpha=0.3)
+
+    for ax in [ax1, ax2]:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+    weeks = (end_date.date() - start_date.date()).days // 7 + 1
+    fig.text(0.99, 0.01, f"Period: {start_date.date()} to {end_date.date()} | {weeks} weeks",
+             ha='right', va='bottom', fontsize=9, style='italic')
+
+    plt.tight_layout(rect=[0, 0.02, 1, 1])
+    overlay_file = f"{report_prefix}_overlay.png"
+    plt.savefig(overlay_file, dpi=100, bbox_inches='tight')
+    plt.close()
+    print(f"{Fore.GREEN}Generated {overlay_file}{Style.RESET_ALL}")
+
+
+def print_summary(agg_df, raw_issues):
+    """Print summary statistics.
+
+    Args:
+        agg_df: Aggregated DataFrame
+        raw_issues: List of raw issues
+    """
+    if agg_df.empty or raw_issues is None or not raw_issues:
+        print(f"\n{Fore.CYAN}No issues found.{Style.RESET_ALL}")
+        return
+
+    print(f"\n{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}Summary:{Style.RESET_ALL}")
+    print(f"  Total issues: {len(raw_issues)}")
+
+    if not agg_df.empty:
+        total_estimate = agg_df['total_estimate_days'].sum()
+        print(f"  Total estimate (days): {total_estimate:.1f}")
+        print(f"\n{Fore.CYAN}Per User:{Style.RESET_ALL}")
+
+        user_summary = agg_df.groupby(['team', 'user', 'display_name']).agg({
+            'issue_count': 'sum',
+            'total_estimate_days': 'sum'
+        }).reset_index().sort_values('total_estimate_days', ascending=False)
+
+        for _, row in user_summary.iterrows():
+            print(f"  {Fore.GREEN}{row['display_name']}{Style.RESET_ALL} ({row['user']}) "
+                  f"— {int(row['issue_count'])} issues, "
+                  f"{row['total_estimate_days']:.1f} days [{row['team']}]")
+
+
+def main():
+    init()
+
+    args = parse_arguments()
+    args.parallel = max(1, min(15, args.parallel))
+
+    date_clause, start_date = parse_period(args.period)
+    if date_clause is None:
+        sys.exit(1)
+
+    end_date = datetime.now()
+
+    config = load_config()
+    backstage_url = get_backstage_url(config, args.backstageUrl)
+    if not backstage_url:
+        print(f"{Fore.RED}Error: No Backstage URL configured.{Style.RESET_ALL}")
+        sys.exit(1)
+
+    # Jira client
+    try:
+        jira_client = jira.JIRA(
+            config["jira_server"],
+            token_auth=config["personal_access_token"],
+        )
+    except Exception as e:
+        print(f"{Fore.RED}Error connecting to Jira: {e}{Style.RESET_ALL}")
+        sys.exit(1)
+
+    # Get teams
+    if args.teams.strip() in ('org', '*'):
+        org_teams = config.get('orgTeams', [])
+        if org_teams:
+            teams = org_teams
+            print(f"{Fore.GREEN}Loaded {len(teams)} team(s) from config{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}Warning: 'orgTeams' not found in config, fetching all teams from Backstage...{Style.RESET_ALL}")
+            all_teams = get_all_teams(backstage_url)
+            teams = [t.get('metadata', {}).get('name', '') for t in all_teams]
+            teams = [t for t in teams if t]
+            print(f"{Fore.GREEN}Found {len(teams)} team(s){Style.RESET_ALL}")
+    elif args.teams.strip() == 'all':
+        print(f"{Fore.CYAN}Fetching all teams from Backstage...{Style.RESET_ALL}")
+        all_teams = get_all_teams(backstage_url)
+        teams = [t.get('metadata', {}).get('name', '') for t in all_teams]
+        teams = [t for t in teams if t]
+        print(f"{Fore.GREEN}Found {len(teams)} team(s){Style.RESET_ALL}")
+    else:
+        teams = [t.strip() for t in args.teams.split(",") if t.strip()]
+
+    if not teams:
+        print(f"{Fore.RED}Error: No valid team names.{Style.RESET_ALL}")
+        sys.exit(1)
+
+    # Get all teams to map names to entities (case-insensitive matching)
+    all_team_entities = get_all_teams(backstage_url)
+    team_map = {t.get('metadata', {}).get('name', ''): t for t in all_team_entities}
+    team_map_lower = {name.lower(): (name, entity) for name, entity in team_map.items()}
+
+    # Collect user queries
+    user_queries = []
+    for team_name in teams:
+        team_name_lower = team_name.lower()
+        if team_name_lower not in team_map_lower:
+            print(f"{Fore.YELLOW}Warning: Team '{team_name}' not found in Backstage{Style.RESET_ALL}")
+            continue
+
+        actual_team_name, team_entity = team_map_lower[team_name_lower]
+        members = get_team_members(backstage_url, team_entity)
+
+        if not members:
+            print(f"{Fore.YELLOW}Warning: No members found for team '{actual_team_name}'{Style.RESET_ALL}")
+            continue
+
+        print(f"{Fore.CYAN}Team: {actual_team_name} ({len(members)} member(s)){Style.RESET_ALL}")
+
+        for member in members:
+            jql = build_jql_for_user(member['username'], date_clause)
+            user_queries.append((member['username'], member['display_name'], actual_team_name, jql))
+
+    if not user_queries:
+        print(f"{Fore.RED}No users to query.{Style.RESET_ALL}")
+        sys.exit(1)
+
+    # Query in parallel
+    print(f"\n{Fore.CYAN}Querying Jira for {len(user_queries)} user(s) ({args.parallel} workers)...{Style.RESET_ALL}")
+
+    raw_issues = []
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+        futures = {
+            executor.submit(query_user_issues, jira_client, username, display_name, team_name, jql): (username, display_name, team_name)
+            for username, display_name, team_name, jql in user_queries
+        }
+
+        for future in as_completed(futures):
+            completed += 1
+            print(f"\r{Fore.CYAN}  Progress: {completed}/{len(user_queries)} users queried{Style.RESET_ALL}    ", end="", flush=True)
+            try:
+                issues = future.result()
+                raw_issues.extend(issues)
+            except Exception as e:
+                print(f"\n{Fore.YELLOW}Warning: Error querying user: {e}{Style.RESET_ALL}")
+
+    print()  # newline after progress
+
+    if not raw_issues:
+        print(f"{Fore.YELLOW}No issues found for the given time period.{Style.RESET_ALL}")
+        sys.exit(0)
+
+    # Create DataFrame and aggregate
+    df = pd.DataFrame(raw_issues)
+    df['resolved_date'] = pd.to_datetime(df['resolved_date'])
+
+    agg_df = aggregate_to_weekly(df)
+
+    # Print summary
+    print_summary(agg_df, raw_issues)
+
+    # Export CSV
+    if args.output:
+        print(f"\n{Fore.CYAN}Exporting CSV...{Style.RESET_ALL}")
+        export_csv(raw_issues, agg_df, args.output)
+
+    # Generate charts
+    if args.report:
+        print(f"\n{Fore.CYAN}Generating charts...{Style.RESET_ALL}")
+        for team_name in agg_df['team'].unique():
+            team_df = agg_df[agg_df['team'] == team_name]
+            generate_team_chart(team_name, team_df, args.report, start_date, end_date)
+        generate_overlay_chart(agg_df, args.report, start_date, end_date)
+
+
+if __name__ == "__main__":
+    main()

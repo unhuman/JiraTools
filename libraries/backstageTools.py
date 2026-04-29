@@ -130,14 +130,87 @@ def get_team_components(backstage_url: str, team_name: str, timeout: int = 30) -
     Query Backstage for all application components owned by a specific team.
     Convenience wrapper that fetches all components and filters for a single team.
     For processing multiple teams, use get_all_components() + filter_components_for_team() instead.
-    
+
     Args:
         backstage_url: Base URL for Backstage instance
         team_name: Name of the team
         timeout: Request timeout in seconds
-        
+
     Returns:
         List of application components owned by the team
     """
     all_components = get_all_components(backstage_url, timeout)
     return filter_components_for_team(all_components, team_name)
+
+
+def get_user_info(backstage_url: str, user_ref: str, timeout: int = 30) -> Dict:
+    """
+    Fetch display name and email for a Backstage user.
+
+    Args:
+        backstage_url: Base URL for Backstage instance
+        user_ref: User reference (e.g., 'user:default/john.doe', 'user:john.doe', or 'john.doe')
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dict with keys: 'username' (bare username), 'display_name', 'email'
+    """
+    user_ref_lower = user_ref.lower()
+    namespace = 'default'
+    username = user_ref
+
+    if 'user:' in user_ref_lower:
+        parts = user_ref.split('/')
+        if len(parts) >= 2:
+            namespace = parts[0].replace('user:', '')
+            username = parts[1]
+        else:
+            username = user_ref.replace('user:', '')
+
+    url = f"{backstage_url}/api/catalog/entities/by-name/user/{namespace}/{username}"
+
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+
+        entity = response.json()
+        profile = entity.get('metadata', {}).get('profile', {})
+        spec_profile = entity.get('spec', {}).get('profile', {})
+
+        display_name = profile.get('displayName') or spec_profile.get('displayName') or username
+        email = profile.get('email') or spec_profile.get('email') or ''
+
+        return {
+            'username': username,
+            'display_name': display_name,
+            'email': email,
+        }
+    except requests.exceptions.RequestException as e:
+        return {
+            'username': username,
+            'display_name': username,
+            'email': '',
+        }
+
+
+def get_team_members(backstage_url: str, team: Dict, timeout: int = 30) -> List[Dict]:
+    """
+    Fetch all members of a Backstage team with their details.
+
+    Args:
+        backstage_url: Base URL for Backstage instance
+        team: Team entity dict (from get_all_teams)
+        timeout: Request timeout in seconds
+
+    Returns:
+        List of dicts with keys: 'username', 'display_name', 'email'
+    """
+    members = team.get('spec', {}).get('members', [])
+    result = []
+
+    for user_ref in members:
+        if user_ref and isinstance(user_ref, str):
+            user_info = get_user_info(backstage_url, user_ref, timeout=timeout)
+            result.append(user_info)
+
+    return result

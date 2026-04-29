@@ -185,11 +185,12 @@ def query_user_issues(jira_client, username, display_name, team_name, jql):
     return issues
 
 
-def aggregate_to_weekly(df):
+def aggregate_to_weekly(df, day_size=6):
     """Aggregate issue data to weekly buckets.
 
     Args:
         df: DataFrame with resolved_date and original_estimate_seconds columns
+        day_size: Work hours per day (default: 6)
 
     Returns:
         Aggregated DataFrame
@@ -204,19 +205,46 @@ def aggregate_to_weekly(df):
         total_estimate_seconds=('original_estimate_seconds', 'sum'),
     ).reset_index()
 
-    agg['total_estimate_days'] = (agg['total_estimate_seconds'] / 86400).round(2)
+    agg['total_estimate_days'] = (agg['total_estimate_seconds'] / (day_size * 3600)).round(2)
+    agg['total_estimate_weeks'] = (agg['total_estimate_days'] / 5).round(2)
     agg = agg.drop(columns=['total_estimate_seconds'])
 
     return agg.sort_values(['team', 'user', 'week_start'])
 
 
-def export_csv(raw_issues, agg_df, output_prefix):
+def make_cumulative(agg_df):
+    """Convert weekly aggregated data to cumulative values.
+
+    Args:
+        agg_df: Aggregated DataFrame with weekly data
+
+    Returns:
+        DataFrame with cumulative issue_count and total_estimate_days
+    """
+    if agg_df.empty:
+        return pd.DataFrame()
+
+    cum_df = agg_df.copy()
+
+    for team in cum_df['team'].unique():
+        team_mask = cum_df['team'] == team
+        for user in cum_df.loc[team_mask, 'user'].unique():
+            user_mask = team_mask & (cum_df['user'] == user)
+            cum_df.loc[user_mask, 'issue_count'] = cum_df.loc[user_mask, 'issue_count'].cumsum()
+            cum_df.loc[user_mask, 'total_estimate_days'] = cum_df.loc[user_mask, 'total_estimate_days'].cumsum()
+            cum_df.loc[user_mask, 'total_estimate_weeks'] = cum_df.loc[user_mask, 'total_estimate_weeks'].cumsum()
+
+    return cum_df
+
+
+def export_csv(raw_issues, agg_df, output_prefix, day_size=6):
     """Export raw and aggregated data to CSV files.
 
     Args:
         raw_issues: List of raw issue dicts
         agg_df: Aggregated DataFrame
         output_prefix: Output file prefix
+        day_size: Work hours per day (default: 6)
     """
     raw_file = f"{output_prefix}_raw.csv"
     agg_file = f"{output_prefix}_aggregated.csv"
@@ -226,10 +254,11 @@ def export_csv(raw_issues, agg_df, output_prefix):
         writer = csv.writer(f)
         writer.writerow([
             'Team', 'User', 'Display Name', 'Issue Key', 'Summary',
-            'Resolved Date', 'Original Estimate (days)', 'Issue Type'
+            'Resolved Date', 'Original Estimate (weeks)', 'Issue Type'
         ])
         for issue in raw_issues:
-            estimate_days = round(issue['original_estimate_seconds'] / 86400, 2)
+            estimate_days = round(issue['original_estimate_seconds'] / (day_size * 3600), 2)
+            estimate_weeks = round(estimate_days / 5, 2)
             writer.writerow([
                 issue['team'],
                 issue['user'],
@@ -237,7 +266,7 @@ def export_csv(raw_issues, agg_df, output_prefix):
                 issue['issue_key'],
                 issue['summary'],
                 issue['resolved_date'],
-                estimate_days,
+                estimate_weeks,
                 issue['issue_type'],
             ])
 
@@ -247,9 +276,9 @@ def export_csv(raw_issues, agg_df, output_prefix):
     if not agg_df.empty:
         agg_df_sorted = agg_df.sort_values(['team', 'user', 'week_start'])
         agg_df_sorted['Week Start'] = agg_df_sorted['week_start'].dt.strftime('%Y-%m-%d')
-        agg_df_sorted[['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_days']].to_csv(
+        agg_df_sorted[['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_weeks']].to_csv(
             agg_file, index=False,
-            header=['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (days)']
+            header=['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (weeks)']
         )
         print(f"{Fore.GREEN}Aggregated results exported to {agg_file}{Style.RESET_ALL}")
 
@@ -278,17 +307,17 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
         user_df = team_df[team_df['user'] == user].sort_values('week_start')
         display_name = user_df['display_name'].iloc[0]
         ax1.plot(user_df['week_start'], user_df['issue_count'], marker='o', label=display_name, linewidth=2)
-        ax2.plot(user_df['week_start'], user_df['total_estimate_days'], marker='o', label=display_name, linewidth=2)
+        ax2.plot(user_df['week_start'], user_df['total_estimate_weeks'], marker='o', label=display_name, linewidth=2)
 
-    ax1.set_title(f"{team_name} — Issue Count by Week", fontsize=12, fontweight='bold')
+    ax1.set_title(f"{team_name} — Cumulative Issue Count", fontsize=12, fontweight='bold')
     ax1.set_ylabel('Issue Count', fontsize=10)
     ax1.legend(loc='best', fontsize=9)
     ax1.grid(True, alpha=0.3)
     ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
 
-    ax2.set_title(f"{team_name} — Original Estimate (days) by Week", fontsize=12, fontweight='bold')
+    ax2.set_title(f"{team_name} — Cumulative Original Estimate (weeks)", fontsize=12, fontweight='bold')
     ax2.set_xlabel('Week of', fontsize=10)
-    ax2.set_ylabel('Estimate (days)', fontsize=10)
+    ax2.set_ylabel('Estimate (weeks)', fontsize=10)
     ax2.legend(loc='best', fontsize=9)
     ax2.grid(True, alpha=0.3)
 
@@ -312,22 +341,22 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
 
     team_total = team_df.groupby('week_start').agg({
         'issue_count': 'sum',
-        'total_estimate_days': 'sum'
+        'total_estimate_weeks': 'sum'
     }).reset_index()
     team_total = team_total.sort_values('week_start')
 
     ax1.plot(team_total['week_start'], team_total['issue_count'], marker='o', color='#2E86AB', linewidth=2.5, markersize=6)
     ax1.fill_between(team_total['week_start'], team_total['issue_count'], alpha=0.3, color='#2E86AB')
-    ax1.set_title(f"{team_name} — Issue Count by Week (Team Total)", fontsize=12, fontweight='bold')
+    ax1.set_title(f"{team_name} — Cumulative Issue Count (Team Total)", fontsize=12, fontweight='bold')
     ax1.set_ylabel('Issue Count', fontsize=10)
     ax1.grid(True, alpha=0.3)
     ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
 
-    ax2.plot(team_total['week_start'], team_total['total_estimate_days'], marker='o', color='#A23B72', linewidth=2.5, markersize=6)
-    ax2.fill_between(team_total['week_start'], team_total['total_estimate_days'], alpha=0.3, color='#A23B72')
-    ax2.set_title(f"{team_name} — Original Estimate (days) by Week (Team Total)", fontsize=12, fontweight='bold')
+    ax2.plot(team_total['week_start'], team_total['total_estimate_weeks'], marker='o', color='#A23B72', linewidth=2.5, markersize=6)
+    ax2.fill_between(team_total['week_start'], team_total['total_estimate_weeks'], alpha=0.3, color='#A23B72')
+    ax2.set_title(f"{team_name} — Cumulative Original Estimate (weeks) (Team Total)", fontsize=12, fontweight='bold')
     ax2.set_xlabel('Week of', fontsize=10)
-    ax2.set_ylabel('Estimate (days)', fontsize=10)
+    ax2.set_ylabel('Estimate (weeks)', fontsize=10)
     ax2.grid(True, alpha=0.3)
 
     for ax in [ax1, ax2]:
@@ -350,7 +379,7 @@ def generate_overlay_chart(agg_df, report_prefix, start_date, end_date):
     """Generate overlay chart showing all teams.
 
     Args:
-        agg_df: Full aggregated DataFrame
+        agg_df: Full cumulative DataFrame (already cumulative per user)
         report_prefix: PNG prefix
         start_date: Report start date
         end_date: Report end date
@@ -364,23 +393,40 @@ def generate_overlay_chart(agg_df, report_prefix, start_date, end_date):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
 
     for team in agg_df['team'].unique():
-        team_df = agg_df[agg_df['team'] == team].groupby('week_start').agg({
+        team_df = agg_df[agg_df['team'] == team].copy()
+        # Forward-fill missing weeks per user so cumulative values carry forward
+        all_weeks = pd.date_range(team_df['week_start'].min(), team_df['week_start'].max(), freq='W-MON')
+
+        filled_rows = []
+        for user in team_df['user'].unique():
+            user_df = team_df[team_df['user'] == user].set_index('week_start').sort_index()
+            user_df = user_df.reindex(all_weeks)
+            user_df = user_df.ffill()  # Forward fill to carry last cumulative values forward
+            user_df['user'] = user
+            user_df['team'] = team
+            filled_rows.append(user_df.reset_index().rename(columns={'index': 'week_start'}))
+
+        team_df = pd.concat(filled_rows, ignore_index=True)
+        team_df = team_df.dropna(subset=['issue_count'])  # Remove rows that had no data
+
+        # Now sum cumulative values per week across all users
+        team_total = team_df.groupby('week_start').agg({
             'issue_count': 'sum',
-            'total_estimate_days': 'sum'
+            'total_estimate_weeks': 'sum'
         }).reset_index().sort_values('week_start')
 
-        ax1.plot(team_df['week_start'], team_df['issue_count'], marker='o', label=team, linewidth=2)
-        ax2.plot(team_df['week_start'], team_df['total_estimate_days'], marker='o', label=team, linewidth=2)
+        ax1.plot(team_total['week_start'], team_total['issue_count'], marker='o', label=team, linewidth=2)
+        ax2.plot(team_total['week_start'], team_total['total_estimate_weeks'], marker='o', label=team, linewidth=2)
 
-    ax1.set_title("All Teams — Issue Count by Week", fontsize=12, fontweight='bold')
+    ax1.set_title("All Teams — Cumulative Issue Count", fontsize=12, fontweight='bold')
     ax1.set_ylabel('Issue Count', fontsize=10)
     ax1.legend(loc='best', fontsize=9)
     ax1.grid(True, alpha=0.3)
     ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
 
-    ax2.set_title("All Teams — Original Estimate (days) by Week", fontsize=12, fontweight='bold')
+    ax2.set_title("All Teams — Cumulative Original Estimate (weeks)", fontsize=12, fontweight='bold')
     ax2.set_xlabel('Week of', fontsize=10)
-    ax2.set_ylabel('Estimate (days)', fontsize=10)
+    ax2.set_ylabel('Estimate (weeks)', fontsize=10)
     ax2.legend(loc='best', fontsize=9)
     ax2.grid(True, alpha=0.3)
 
@@ -416,19 +462,19 @@ def print_summary(agg_df, raw_issues):
     print(f"  Total issues: {len(raw_issues)}")
 
     if not agg_df.empty:
-        total_estimate = agg_df['total_estimate_days'].sum()
-        print(f"  Total estimate (days): {total_estimate:.1f}")
+        total_estimate = agg_df['total_estimate_weeks'].sum()
+        print(f"  Total estimate (weeks): {total_estimate:.1f}")
         print(f"\n{Fore.CYAN}Per User:{Style.RESET_ALL}")
 
         user_summary = agg_df.groupby(['team', 'user', 'display_name']).agg({
             'issue_count': 'sum',
-            'total_estimate_days': 'sum'
-        }).reset_index().sort_values('total_estimate_days', ascending=False)
+            'total_estimate_weeks': 'sum'
+        }).reset_index().sort_values('total_estimate_weeks', ascending=False)
 
         for _, row in user_summary.iterrows():
             print(f"  {Fore.GREEN}{row['display_name']}{Style.RESET_ALL} ({row['user']}) "
                   f"— {int(row['issue_count'])} issues, "
-                  f"{row['total_estimate_days']:.1f} days [{row['team']}]")
+                  f"{row['total_estimate_weeks']:.1f} weeks [{row['team']}]")
 
 
 def main():
@@ -448,6 +494,9 @@ def main():
     if not backstage_url:
         print(f"{Fore.RED}Error: No Backstage URL configured.{Style.RESET_ALL}")
         sys.exit(1)
+
+    # Load day_size from config (default: 6 hours)
+    day_size = config.get('day_size', 6)
 
     # Jira client
     try:
@@ -545,7 +594,7 @@ def main():
     df = pd.DataFrame(raw_issues)
     df['resolved_date'] = pd.to_datetime(df['resolved_date'])
 
-    agg_df = aggregate_to_weekly(df)
+    agg_df = aggregate_to_weekly(df, day_size=day_size)
 
     # Print summary
     print_summary(agg_df, raw_issues)
@@ -553,15 +602,16 @@ def main():
     # Export CSV
     if args.output:
         print(f"\n{Fore.CYAN}Exporting CSV...{Style.RESET_ALL}")
-        export_csv(raw_issues, agg_df, args.output)
+        export_csv(raw_issues, agg_df, args.output, day_size=day_size)
 
-    # Generate charts
+    # Generate charts with cumulative data
     if args.report:
         print(f"\n{Fore.CYAN}Generating charts...{Style.RESET_ALL}")
-        for team_name in agg_df['team'].unique():
-            team_df = agg_df[agg_df['team'] == team_name]
+        cum_df = make_cumulative(agg_df)
+        for team_name in cum_df['team'].unique():
+            team_df = cum_df[cum_df['team'] == team_name]
             generate_team_chart(team_name, team_df, args.report, start_date, end_date)
-        generate_overlay_chart(agg_df, args.report, start_date, end_date)
+        generate_overlay_chart(cum_df, args.report, start_date, end_date)
 
 
 if __name__ == "__main__":

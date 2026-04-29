@@ -88,9 +88,9 @@ def parse_period(period_str):
     today = datetime.now()
 
     if period_str == 'ytd':
-        return "AFTER startOfYear()", datetime(today.year, 1, 1)
+        return ">= startOfYear()", datetime(today.year, 1, 1)
     elif period_str == 'month':
-        return "AFTER startOfMonth()", datetime(today.year, today.month, 1)
+        return ">= startOfMonth()", datetime(today.year, today.month, 1)
     elif period_str.endswith('m'):
         try:
             months = int(period_str[:-1])
@@ -98,7 +98,7 @@ def parse_period(period_str):
             days_back = months * 30
             start_date = today - timedelta(days=days_back)
             jql_date = start_date.strftime("%Y-%m-%d")
-            return f'AFTER {jql_date}', start_date
+            return f'>= {jql_date}', start_date
         except ValueError:
             print(f"{Fore.RED}Error: Invalid period '{period_str}'. Use 'ytd', 'month', or 'Nm' (e.g., '3m'){Style.RESET_ALL}")
             return None, None
@@ -129,7 +129,8 @@ def build_jql_for_user(username, date_clause):
         f'Assignee = "{username}" '
         'AND issuetype not in (subTaskIssueTypes(), Epic, "Test Case Execution", "Test Execution", Test, DBCR) '
         f'AND status IN ({status_list}) '
-        f'AND (status CHANGED TO ({status_list}) {date_clause}) '
+        f'AND updated {date_clause} '
+        f'AND (resolutiondate is EMPTY OR resolutiondate {date_clause}) '
         'ORDER BY resolved DESC'
     )
     return jql
@@ -151,7 +152,7 @@ def query_user_issues(jira_client, username, display_name, job_title, team_name,
     """
     issues = []
     try:
-        fields = ['summary', 'resolutiondate', 'timeoriginalestimate', 'issuetype', 'assignee']
+        fields = ['summary', 'resolutiondate', 'updated', 'timeoriginalestimate', 'issuetype', 'assignee']
         results = search_issues(jira_client, jql, max_results=False, fields=fields)
 
         for issue in results:
@@ -164,7 +165,14 @@ def query_user_issues(jira_client, username, display_name, job_title, team_name,
                     pass
 
             if not resolved_date:
-                continue
+                updated_str = getattr(issue.fields, 'updated', None)
+                if updated_str:
+                    try:
+                        resolved_date = datetime.strptime(updated_str[:10], "%Y-%m-%d").date()
+                    except (ValueError, AttributeError, TypeError):
+                        pass
+                if not resolved_date:
+                    continue
 
             original_estimate_seconds = getattr(issue.fields, 'timeoriginalestimate', None) or 0
 

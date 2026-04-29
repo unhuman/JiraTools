@@ -10,7 +10,8 @@ Usage:
 import argparse
 from datetime import datetime
 from jira import JIRA
-from libraries.jiraToolsConfig import load_config, statusIsDone # This config needs to be updated
+from libraries.jiraToolsConfig import load_config, statusIsDone
+from libraries.jiraQueryTools import search_issues, build_subtask_query
 
 def main():
     """
@@ -39,15 +40,10 @@ def main():
         print("Connected to Jira successfully.")
 
         # Construct the initial JQL query to find all relevant subtasks
-        jql_query = (
-            f"issuetype in subTaskIssueTypes() AND assignee = '{args.user}' "
-            f"AND updated >= '{args.start_date}' AND updated <= '{args.end_date}'"
-        )
-        print(f"Executing JQL: {jql_query}")
-        
+        jql_query = build_subtask_query(args.user, args.start_date, args.end_date)
+
         # Fetch the subtasks using the corrected method for the jira-python library
-        subtasks = jira_client.search_issues(jql_query)
-        print(f"Found {len(subtasks)} subtasks matching the initial criteria.")
+        subtasks = search_issues(jira_client, jql_query)
 
         mismatched_subtasks = []
 

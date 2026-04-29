@@ -7,6 +7,7 @@ from colorama import init, Fore, Back, Style
 from datetime import datetime
 import jira
 from libraries.jiraToolsConfig import load_config, statusIsDone
+from libraries.jiraQueryTools import search_issues, build_epic_query
 
 def sprint_sort_key(item):  # Custom sort function (Handles None Dates)
     sprint_id = item[0]
@@ -81,12 +82,8 @@ if __name__ == '__main__':
         print(f"Error retrieving epic: {e}")
         exit(1)
 
-    jql = f"\"Epic Link\"={epic_key}"
-    try:
-        issues = jira_client.search_issues(jql, maxResults=False)
-    except jira.exceptions.JIRAError as e:
-        print(f"Error searching issues: {e}")
-        exit(1)
+    jql = build_epic_query(epic_key)
+    issues = search_issues(jira_client, jql, max_results=False)
 
     # Organize issues by sprint ID and status
     planned_issues = {}

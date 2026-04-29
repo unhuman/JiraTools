@@ -7,38 +7,13 @@ import time
 from colorama import init, Fore, Style
 import jira
 from libraries.jiraToolsConfig import load_config, safe_jira_update, convert_story_points_to_estimate, MINUTES_PER_POINT
+from libraries.jiraQueryTools import search_issues, build_remaining_estimate_query
 
 # Configuration constants
 STORY_POINTS_FIELD = 'customfield_10502'  # Story Points custom field ID
 TIME_TRACKING_FIELD = 'timetracking'  # Time Tracking field
 ORIGINAL_ESTIMATE_FIELD = 'originalEstimate'  # Original Estimate field (for updates)
 REMAINING_ESTIMATE_FIELD = 'remainingEstimate' # Remaining Estimate field
-
-def build_jql_query(query_type, name):
-    """Build the JQL query based on type (assignee or team) and name."""
-    # Base query components
-    # we only want stories that have story points, no original estimate, and are in a done state
-    # and were changed to that state after the start of the year
-    base_conditions = [
-        '"Story Points" > 0',
-        'originalEstimate > 0',
-        'remainingEstimate = 0',
-        'issuetype not in (subTaskIssueTypes(), "Test Case Execution", "Test Execution", Test, DBCR)',
-        'status NOT IN ("Acceptance", "Approved to Deploy", Certified, Closed, Complete, Completed, Deployed, Done, "Ready for Deployment", "Ready For Release", "Ready to Deploy", "Ready to Release", Released, Resolved, Withdrawn)'  # no comma here
-        ' ORDER BY key ASC'
-    ]
-
-    # Add the assignee or team condition
-    if query_type.lower() == "assignee":
-        assignee_condition = f'Assignee = "{name}"'
-    elif query_type.lower() == "team":
-        assignee_condition = f'"Sprint Team" = "{name}"'
-    else:
-        raise ValueError(f"Invalid query type: {query_type}. Must be 'assignee' or 'team'")
-
-    # Combine all conditions
-    all_conditions = [assignee_condition] + base_conditions
-    return " AND ".join(all_conditions)
 
 if __name__ == '__main__':
     # Parse command-line arguments
@@ -53,9 +28,7 @@ if __name__ == '__main__':
 
     # Build the JQL query based on the provided type and name
     try:
-        jql_query = build_jql_query(args.type, args.name)
-        print(f"{Style.BRIGHT}Using JQL query:{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}{jql_query}{Style.RESET_ALL}\n")
+        jql_query = build_remaining_estimate_query(args.type, args.name)
     except ValueError as e:
         print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}")
         exit(1)
@@ -70,12 +43,7 @@ if __name__ == '__main__':
         exit(1)
 
     # Search for issues using the built JQL query
-    try:
-        issues = jira_client.search_issues(jql_query, maxResults=False, fields=f"summary,{STORY_POINTS_FIELD},{TIME_TRACKING_FIELD}")
-        print(f"{Style.BRIGHT}Found {len(issues)} issues matching the query.{Style.RESET_ALL}")
-    except jira.exceptions.JIRAError as e:
-        print(f"{Fore.RED}Error executing JQL query: {e}{Style.RESET_ALL}")
-        exit(1)
+    issues = search_issues(jira_client, jql_query, max_results=False, fields=f"summary,{STORY_POINTS_FIELD},{TIME_TRACKING_FIELD}")
 
     if len(issues) == 0:
         print(f"{Fore.YELLOW}No issues found matching the query.{Style.RESET_ALL}")

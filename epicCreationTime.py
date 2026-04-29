@@ -3,9 +3,10 @@
 import argparse
 from datetime import datetime, timedelta
 import jira
-from libraries.jiraToolsConfig import load_config, statusIsDone # Import your configuration and utility functions
+from libraries.jiraToolsConfig import load_config, statusIsDone
+from libraries.jiraQueryTools import search_issues, build_open_epics_query
 import sys
-import re # For parsing sprint data if it's a string
+import re
 
 def parse_jira_datetime(dt_str):
     """
@@ -55,48 +56,11 @@ def get_open_epics(jira_client, sprint_team_name_filter=None, project_key=None):
     """
     Fetches all open epics, optionally filtered by project key and/or a "Sprint Team" field on the epic itself.
     An epic is considered 'open' if its status category is not 'Done'.
-
-    Args:
-        jira_client: An initialized Jira client object.
-        sprint_team_name_filter: (Optional) A string that is the value of the "Sprint Team" custom field on the epic.
-                                 If provided, epics will be filtered by this field directly.
-        project_key: (Optional) The key of the Jira project (e.g., 'PROJ').
-                     If provided, epics will be scoped to this project.
-
-    Returns:
-        A list of Jira Issue objects representing the open epics,
-        or an empty list if none are found or an error occurs.
     """
-    print(f"\nSearching for open epics...")
-    jql_parts = [
-        'issueType = Epic',
-        'statusCategory != "Done"'
-    ]
-
-    if project_key:
-        jql_parts.append(f'project = "{project_key}"')
-        print(f"  (Scoped to project: '{project_key}')")
-
-    # Assuming "Sprint Team" is a custom field on the Epic issue type itself
-    if sprint_team_name_filter:
-        # Use a case-insensitive 'LIKE' search if the exact match isn't always present
-        # or if the field can contain more text. For exact match, use '='
-        jql_parts.append(f'"Sprint Team" = "{sprint_team_name_filter}"')
-        print(f"  (Filtered by Epic's 'Sprint Team' field: '{sprint_team_name_filter}')")
-
-    jql_open_epics = " AND ".join(jql_parts) + ' ORDER BY created ASC'
-    print(f"  JQL Query: {jql_open_epics}")
-
-    epics = []
-    try:
-        # Request necessary fields: summary and created date
-        epics = jira_client.search_issues(jql_open_epics, maxResults=False, fields="summary,created")
-        if not epics:
-            print(f"No open epics found for the specified criteria.")
-        else:
-            print(f"Found {len(epics)} open epics.")
-    except jira.exceptions.JIRAError as e:
-        print(f"Error searching for epics: {e}")
+    jql_query = build_open_epics_query(project_key, sprint_team_name_filter)
+    epics = search_issues(jira_client, jql_query, max_results=False, fields="summary,created")
+    if not epics:
+        print("No open epics found for the specified criteria.")
     return epics
 
 def get_epic_development_data(jira_client, epic):

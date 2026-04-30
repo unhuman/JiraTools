@@ -23,7 +23,15 @@ Useful Stuff for working with Jira
 - `excelTools.py`: Shared Excel reading utilities and team management functions
 - `backstageTools.py`: Shared Backstage API utilities for querying components and teams
 
-## Importing Tickets via Claude Code MCP
+## Using JiraTools with Claude Code
+
+For comprehensive documentation on integrating JiraTools with Claude Code, including setup, common workflows, and best practices, see:
+
+- **[claudeCodeIntegration.md](docs/claudeCodeIntegration.md)** — Setup, field mapping, and best practices
+- **[claudeCodeRecipes.md](docs/claudeCodeRecipes.md)** — 10 practical workflows and ready-to-use prompts
+- **[claudeCodeQuickRef.md](docs/claudeCodeQuickRef.md)** — Quick reference for MCP commands and JQL
+
+### Importing Tickets via Claude Code MCP
 
 As an alternative to the `--csv` import workflow, you can use Claude Code with a Jira MCP server to create tickets directly from the generated CSV files.
 

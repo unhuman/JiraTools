@@ -377,10 +377,10 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     weeks = (end_date.date() - start_date.date()).days // 7 + 1
-    fig.text(0.99, 0.01, f"Period: {start_date.date()} to {end_date.date()} | {weeks} weeks",
-             ha='right', va='bottom', fontsize=9, style='italic')
+    fig.text(0.5, 0.98, f"{team_name.capitalize()} — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
+             ha='center', va='top', fontsize=13, fontweight='bold')
 
-    plt.tight_layout(rect=[0, 0.02, 1, 1])
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
     individuals_file = f"{report_prefix}_{team_name}_individuals.png"
     plt.savefig(individuals_file, dpi=100, bbox_inches='tight')
     plt.close()
@@ -427,10 +427,10 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     weeks = (end_date.date() - start_date.date()).days // 7 + 1
-    fig.text(0.99, 0.01, f"Period: {start_date.date()} to {end_date.date()} | {weeks} weeks",
-             ha='right', va='bottom', fontsize=9, style='italic')
+    fig.text(0.5, 0.98, f"{team_name.capitalize()} — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
+             ha='center', va='top', fontsize=13, fontweight='bold')
 
-    plt.tight_layout(rect=[0, 0.02, 1, 1])
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
     total_file = f"{report_prefix}_{team_name}_total.png"
     plt.savefig(total_file, dpi=100, bbox_inches='tight')
     plt.close()
@@ -462,11 +462,11 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     total_rows = 2 + num_developers
     height_ratios = [2.5, 2.5] + [1] * num_developers
 
-    # Physical height: team + combined at 3.5 inches each, devs at 2 inches each
-    fig_height = 3.5 + 3.5 + (num_developers * 2.0)
+    # Physical height: team + combined at 3.5 inches each, devs at 2 inches each + header
+    fig_height = 3.5 + 3.5 + (num_developers * 2.0) + 1.5
     fig = plt.figure(figsize=(14, fig_height), constrained_layout=True)
 
-    # Create grid with height ratios (no manual hspace/wspace needed)
+    # Create grid with height ratios (constrained_layout manages spacing automatically)
     gs = fig.add_gridspec(total_rows, 2, height_ratios=height_ratios, wspace=0.3)
 
     # Calculate team total
@@ -588,8 +588,8 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
             ax.tick_params(axis='y', labelsize=8)
 
     weeks = (end_date.date() - start_date.date()).days // 7 + 1
-    fig.text(0.99, 0.01, f"Period: {start_date.date()} to {end_date.date()} | {weeks} weeks",
-             ha='right', va='bottom', fontsize=8, style='italic')
+    fig.suptitle(f"{team_name.capitalize()} — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
+                 fontsize=20, fontweight='bold')
 
     overall_file = f"{report_prefix}_{team_name}_overall.png"
     plt.savefig(overall_file, dpi=100, bbox_inches='tight')
@@ -658,10 +658,10 @@ def generate_overlay_chart(agg_df, report_prefix, start_date, end_date):
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     weeks = (end_date.date() - start_date.date()).days // 7 + 1
-    fig.text(0.99, 0.01, f"Period: {start_date.date()} to {end_date.date()} | {weeks} weeks",
-             ha='right', va='bottom', fontsize=9, style='italic')
+    fig.text(0.5, 0.98, f"All Teams — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
+             ha='center', va='top', fontsize=13, fontweight='bold')
 
-    plt.tight_layout(rect=[0, 0.02, 1, 1])
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
     overlay_file = f"{report_prefix}_overlay.png"
     plt.savefig(overlay_file, dpi=100, bbox_inches='tight')
     plt.close()

@@ -346,14 +346,20 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
     # Individual chart
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
 
+    max_issue_count = 0
+    max_estimate = 0
+
     for user in team_df['user'].unique():
         user_df = team_df[team_df['user'] == user].sort_values('week_start')
         display_name = user_df['display_name'].iloc[0]
         ax1.plot(user_df['week_start'], user_df['issue_count'], marker='o', label=display_name, linewidth=2)
         ax2.plot(user_df['week_start'], user_df['total_estimate_weeks'], marker='o', label=display_name, linewidth=2)
+        max_issue_count = max(max_issue_count, user_df['issue_count'].max())
+        max_estimate = max(max_estimate, user_df['total_estimate_weeks'].max())
 
     ax1.set_title(f"{team_name} — Cumulative Issue Count", fontsize=12, fontweight='bold')
     ax1.set_ylabel('Issue Count', fontsize=10)
+    ax1.set_ylim(0, max_issue_count * 1.05)
     ax1.legend(loc='best', fontsize=9)
     ax1.grid(True, alpha=0.3)
     ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -361,6 +367,7 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
     ax2.set_title(f"{team_name} — Cumulative Original Estimate (weeks)", fontsize=12, fontweight='bold')
     ax2.set_xlabel('Week of', fontsize=10)
     ax2.set_ylabel('Estimate (weeks)', fontsize=10)
+    ax2.set_ylim(0, max_estimate * 1.05)
     ax2.legend(loc='best', fontsize=9)
     ax2.grid(True, alpha=0.3)
 
@@ -507,20 +514,27 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     ax_ind_issues = fig.add_subplot(gs[1, 0])
     ax_ind_estimate = fig.add_subplot(gs[1, 1])
 
+    max_ind_issues = 0
+    max_ind_estimate = 0
+
     for user in developers:
         user_df = team_df[team_df['user'] == user].sort_values('week_start')
         display_name = user_df['display_name'].iloc[0]
         ax_ind_issues.plot(user_df['week_start'], user_df['issue_count'], marker='o', label=display_name, linewidth=1.5)
         ax_ind_estimate.plot(user_df['week_start'], user_df['total_estimate_weeks'], marker='o', label=display_name, linewidth=1.5)
+        max_ind_issues = max(max_ind_issues, user_df['issue_count'].max())
+        max_ind_estimate = max(max_ind_estimate, user_df['total_estimate_weeks'].max())
 
     ax_ind_issues.set_title(f"{team_name} — All Developers - Cumulative Issues", fontsize=10, fontweight='bold')
     ax_ind_issues.set_ylabel('Issues', fontsize=9)
+    ax_ind_issues.set_ylim(0, max_ind_issues * 1.05)
     ax_ind_issues.legend(loc='best', fontsize=8)
     ax_ind_issues.grid(True, alpha=0.3)
     ax_ind_issues.yaxis.set_major_locator(MaxNLocator(integer=True))
 
     ax_ind_estimate.set_title(f"{team_name} — All Developers - Cumulative Estimate", fontsize=10, fontweight='bold')
     ax_ind_estimate.set_ylabel('Estimate (weeks)', fontsize=9)
+    ax_ind_estimate.set_ylim(0, max_ind_estimate * 1.05)
     ax_ind_estimate.legend(loc='best', fontsize=8)
     ax_ind_estimate.grid(True, alpha=0.3)
 
@@ -530,6 +544,14 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         ax.xaxis.set_major_locator(mdates.MonthLocator())
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
         ax.tick_params(axis='y', labelsize=8)
+
+    # Calculate max values across all developers for consistent y-axis scaling
+    max_dev_issues = 0
+    max_dev_estimate = 0
+    for user in developers:
+        user_df = team_df[team_df['user'] == user].sort_values('week_start')
+        max_dev_issues = max(max_dev_issues, user_df['issue_count'].max())
+        max_dev_estimate = max(max_dev_estimate, user_df['total_estimate_weeks'].max())
 
     # Plot individual developer breakdowns (rows 2+)
     dev_start_row = 2
@@ -547,6 +569,7 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         title_prefix = f"{display_name} ({job_title})" if job_title else display_name
         ax_issues.set_title(f"{title_prefix} — Issues", fontsize=9, fontweight='bold')
         ax_issues.set_ylabel('Count', fontsize=8)
+        ax_issues.set_ylim(0, max_dev_issues * 1.05)
         ax_issues.grid(True, alpha=0.2)
         ax_issues.yaxis.set_major_locator(MaxNLocator(integer=True))
 
@@ -554,6 +577,7 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         ax_estimate.fill_between(user_df['week_start'], user_df['total_estimate_weeks'], alpha=0.15, color='#F18F01')
         ax_estimate.set_title(f"{title_prefix} — Estimate (weeks)", fontsize=9, fontweight='bold')
         ax_estimate.set_ylabel('Weeks', fontsize=8)
+        ax_estimate.set_ylim(0, max_dev_estimate * 1.05)
         ax_estimate.grid(True, alpha=0.2)
 
         # Format x-axis for individual subplots

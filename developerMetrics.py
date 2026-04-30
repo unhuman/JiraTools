@@ -460,10 +460,10 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     # Grid layout: 1 row per section (team, combined, + one per dev)
     # Use height_ratios to make team/combined proportionally taller
     total_rows = 2 + num_developers
-    height_ratios = [2.5, 2.5] + [1] * num_developers
+    height_ratios = [2.5, 2.5] + [1.5] * num_developers
 
-    # Physical height: team + combined at 3.5 inches each, devs at 2 inches each + header
-    fig_height = 3.5 + 3.5 + (num_developers * 2.0) + 1.5
+    # Physical height: team + combined at 3.5 inches each, devs at 2.5 inches each + header
+    fig_height = 3.5 + 3.5 + (num_developers * 2.5) + 1.5
     fig = plt.figure(figsize=(14, fig_height), constrained_layout=True)
 
     # Create grid with height ratios (constrained_layout manages spacing automatically)
@@ -505,6 +505,7 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
 
     # Format team total x-axes
     for ax in [ax_team_issues, ax_team_estimate]:
+        ax.set_xlim(start_date, end_date + pd.Timedelta(days=2))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         ax.xaxis.set_major_locator(mdates.MonthLocator())
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
@@ -540,6 +541,7 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
 
     # Format combined individuals x-axes
     for ax in [ax_ind_issues, ax_ind_estimate]:
+        ax.set_xlim(start_date, end_date + pd.Timedelta(days=2))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         ax.xaxis.set_major_locator(mdates.MonthLocator())
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
@@ -580,8 +582,9 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         ax_estimate.set_ylim(0, max_dev_estimate * 1.05)
         ax_estimate.grid(True, alpha=0.2)
 
-        # Format x-axis for individual subplots
+        # Format x-axis for individual subplots — fix range so MonthLocator is consistent
         for ax in [ax_issues, ax_estimate]:
+            ax.set_xlim(start_date, end_date + pd.Timedelta(days=2))
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
             ax.xaxis.set_major_locator(mdates.MonthLocator())
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)

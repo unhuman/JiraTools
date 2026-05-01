@@ -30,6 +30,13 @@ from colorama import init, Fore, Style
 from libraries.jiraToolsConfig import load_config, get_backstage_url
 from libraries.backstageTools import get_all_teams, get_team_members
 from libraries.jiraQueryTools import search_issues
+from libraries.githubTools import (
+    derive_github_username,
+    get_github_session,
+    get_github_metrics_for_user,
+    aggregate_github_weekly,
+    print_github_summary
+)
 
 
 def parse_arguments():
@@ -72,6 +79,10 @@ def parse_arguments():
         type=int,
         default=5,
         help="Number of parallel workers for Jira queries (default: 5, max: 15)"
+    )
+    parser.add_argument(
+        "--githubOrg",
+        help="GitHub organization name (overrides github_org in ~/.jiraTools config)"
     )
     return parser.parse_args()
 
@@ -280,7 +291,7 @@ def make_cumulative(agg_df):
     return cum_df
 
 
-def export_csv(raw_issues, agg_df, output_prefix, day_size=6):
+def export_csv(raw_issues, agg_df, output_prefix, day_size=6, github_df=None):
     """Export raw and aggregated data to CSV files.
 
     Args:
@@ -288,6 +299,7 @@ def export_csv(raw_issues, agg_df, output_prefix, day_size=6):
         agg_df: Aggregated DataFrame
         output_prefix: Output file prefix
         day_size: Work hours per day (default: 6)
+        github_df: Optional GitHub metrics DataFrame
     """
     raw_file = f"{output_prefix}_raw.csv"
     agg_file = f"{output_prefix}_aggregated.csv"
@@ -315,14 +327,40 @@ def export_csv(raw_issues, agg_df, output_prefix, day_size=6):
 
     print(f"{Fore.GREEN}Raw results exported to {raw_file}{Style.RESET_ALL}")
 
-    # Aggregated CSV
+    # Aggregated CSV (Phase 3: join GitHub data if available)
     if not agg_df.empty:
         agg_df_sorted = agg_df.sort_values(['team', 'user', 'week_start'])
         agg_df_sorted['Week Start'] = agg_df_sorted['week_start'].dt.strftime('%Y-%m-%d')
-        agg_df_sorted[['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_weeks']].to_csv(
-            agg_file, index=False,
-            header=['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (weeks)']
-        )
+
+        # Join GitHub data if available
+        if github_df is not None and not github_df.empty:
+            # Ensure week_start is datetime in github_df for consistent joining
+            github_df_join = github_df.copy()
+            github_df_join['week_start'] = pd.to_datetime(github_df_join['week_start']).dt.date
+
+            # Join on (team, user, week_start)
+            agg_df_sorted_with_gh = agg_df_sorted.merge(
+                github_df_join[['team', 'user', 'week_start', 'prs_opened', 'commits', 'reviews_given', 'comments_received']],
+                on=['team', 'user', 'week_start'],
+                how='left'
+            )
+            # Fill NaN with 0 for GitHub metrics
+            for col in ['prs_opened', 'commits', 'reviews_given', 'comments_received']:
+                if col in agg_df_sorted_with_gh.columns:
+                    agg_df_sorted_with_gh[col] = agg_df_sorted_with_gh[col].fillna(0).astype(int)
+
+            agg_df_sorted_with_gh[['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_weeks',
+                                    'prs_opened', 'commits', 'reviews_given', 'comments_received']].to_csv(
+                agg_file, index=False,
+                header=['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (weeks)',
+                        'GitHub PRs Opened', 'GitHub Commits', 'GitHub Reviews Given', 'GitHub Comments Received']
+            )
+        else:
+            agg_df_sorted[['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_weeks']].to_csv(
+                agg_file, index=False,
+                header=['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (weeks)']
+            )
+
         print(f"{Fore.GREEN}Aggregated results exported to {agg_file}{Style.RESET_ALL}")
 
 
@@ -338,6 +376,8 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
     """
     if team_df.empty:
         return
+
+    team_display_name = team_name[:1].upper() + team_name[1:]
 
     # Convert week_start to datetime for plotting
     team_df = team_df.copy()
@@ -357,14 +397,14 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
         max_issue_count = max(max_issue_count, user_df['issue_count'].max())
         max_estimate = max(max_estimate, user_df['total_estimate_weeks'].max())
 
-    ax1.set_title(f"{team_name} — Cumulative Issue Count", fontsize=12, fontweight='bold')
+    ax1.set_title(f"{team_display_name} — Cumulative Issue Count", fontsize=12, fontweight='bold')
     ax1.set_ylabel('Issue Count', fontsize=10)
     ax1.set_ylim(0, max_issue_count * 1.05)
     ax1.legend(loc='best', fontsize=9)
     ax1.grid(True, alpha=0.3)
     ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
 
-    ax2.set_title(f"{team_name} — Cumulative Original Estimate (weeks)", fontsize=12, fontweight='bold')
+    ax2.set_title(f"{team_display_name} — Cumulative Original Estimate (weeks)", fontsize=12, fontweight='bold')
     ax2.set_xlabel('Week of', fontsize=10)
     ax2.set_ylabel('Estimate (weeks)', fontsize=10)
     ax2.set_ylim(0, max_estimate * 1.05)
@@ -377,7 +417,7 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     weeks = (end_date.date() - start_date.date()).days // 7 + 1
-    fig.text(0.5, 0.98, f"{team_name.capitalize()} — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
+    fig.text(0.5, 0.98, f"{team_display_name} — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
              ha='center', va='top', fontsize=13, fontweight='bold')
 
     plt.tight_layout(rect=[0, 0, 1, 0.94])
@@ -409,14 +449,14 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
 
     ax1.plot(team_total['week_start'], team_total['issue_count'], marker='o', color='#2E86AB', linewidth=2.5, markersize=6)
     ax1.fill_between(team_total['week_start'], team_total['issue_count'], alpha=0.3, color='#2E86AB')
-    ax1.set_title(f"{team_name} — Cumulative Issue Count (Team Total)", fontsize=12, fontweight='bold')
+    ax1.set_title(f"{team_display_name} — Cumulative Issue Count (Team Total)", fontsize=12, fontweight='bold')
     ax1.set_ylabel('Issue Count', fontsize=10)
     ax1.grid(True, alpha=0.3)
     ax1.yaxis.set_major_locator(MaxNLocator(integer=True))
 
     ax2.plot(team_total['week_start'], team_total['total_estimate_weeks'], marker='o', color='#A23B72', linewidth=2.5, markersize=6)
     ax2.fill_between(team_total['week_start'], team_total['total_estimate_weeks'], alpha=0.3, color='#A23B72')
-    ax2.set_title(f"{team_name} — Cumulative Original Estimate (weeks) (Team Total)", fontsize=12, fontweight='bold')
+    ax2.set_title(f"{team_display_name} — Cumulative Original Estimate (weeks) (Team Total)", fontsize=12, fontweight='bold')
     ax2.set_xlabel('Week of', fontsize=10)
     ax2.set_ylabel('Estimate (weeks)', fontsize=10)
     ax2.grid(True, alpha=0.3)
@@ -427,7 +467,7 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
         plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
     weeks = (end_date.date() - start_date.date()).days // 7 + 1
-    fig.text(0.5, 0.98, f"{team_name.capitalize()} — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
+    fig.text(0.5, 0.98, f"{team_display_name} — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
              ha='center', va='top', fontsize=13, fontweight='bold')
 
     plt.tight_layout(rect=[0, 0, 1, 0.94])
@@ -437,7 +477,7 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
     print(f"{Fore.GREEN}Generated {total_file}{Style.RESET_ALL}")
 
 
-def generate_team_overall_report(team_name, team_df, report_prefix, start_date, end_date):
+def generate_team_overall_report(team_name, team_df, report_prefix, start_date, end_date, github_df=None):
     """Generate a comprehensive single-page team report with team totals, individuals combined, then individual breakdowns.
 
     Args:
@@ -446,9 +486,12 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         report_prefix: PNG prefix
         start_date: Report start date
         end_date: Report end date
+        github_df: Optional GitHub metrics DataFrame with columns: user, team, week_start, prs_opened, commits, reviews_given, comments_received
     """
     if team_df.empty:
         return
+
+    team_display_name = team_name[:1].upper() + team_name[1:]
 
     team_df = team_df.copy()
     team_df['week_start'] = pd.to_datetime(team_df['week_start'])
@@ -457,13 +500,22 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     developers = sorted(team_df['user'].unique())
     num_developers = len(developers)
 
-    # Grid layout: 1 row per section (team, combined, + one per dev)
-    # Use height_ratios to make team/combined proportionally taller
-    total_rows = 2 + num_developers
-    height_ratios = [2.5, 2.5] + [1.5] * num_developers
+    # Check if GitHub data is available for this team
+    github_enabled = github_df is not None and not github_df.empty and (github_df['team'] == team_name).any()
 
-    # Physical height: team + combined at 3.5 inches each, devs at 2.5 inches each + header
-    fig_height = 3.5 + 3.5 + (num_developers * 2.5) + 1.5
+    # Grid layout: 1 row per section (team, combined, + one or two per dev)
+    # When GitHub enabled: Jira row + GitHub row per dev
+    if github_enabled:
+        # Filter GitHub data to this team for reference
+        team_github_df = github_df[github_df['team'] == team_name]
+        total_rows = 2 + (num_developers * 2)
+        height_ratios = [2.5, 2.5] + ([1.5, 1.0] * num_developers)
+        fig_height = 3.5 + 3.5 + (num_developers * 2.5) + 2.0
+    else:
+        total_rows = 2 + num_developers
+        height_ratios = [2.5, 2.5] + [1.5] * num_developers
+        fig_height = 3.5 + 3.5 + (num_developers * 2.5) + 1.5
+
     fig = plt.figure(figsize=(14, fig_height), constrained_layout=True)
 
     # Create grid with height ratios (constrained_layout manages spacing automatically)
@@ -492,14 +544,14 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
 
     ax_team_issues.plot(team_total['week_start'], team_total['issue_count'], marker='o', color='#2E86AB', linewidth=2, markersize=5)
     ax_team_issues.fill_between(team_total['week_start'], team_total['issue_count'], alpha=0.2, color='#2E86AB')
-    ax_team_issues.set_title(f"{team_name} — Team Total Issue Count", fontsize=10, fontweight='bold')
+    ax_team_issues.set_title(f"{team_display_name} — Team Total Issue Count", fontsize=10, fontweight='bold')
     ax_team_issues.set_ylabel('Issues', fontsize=9)
     ax_team_issues.grid(True, alpha=0.3)
     ax_team_issues.yaxis.set_major_locator(MaxNLocator(integer=True))
 
     ax_team_estimate.plot(team_total['week_start'], team_total['total_estimate_weeks'], marker='o', color='#A23B72', linewidth=2, markersize=5)
     ax_team_estimate.fill_between(team_total['week_start'], team_total['total_estimate_weeks'], alpha=0.2, color='#A23B72')
-    ax_team_estimate.set_title(f"{team_name} — Team Total Estimate (weeks)", fontsize=10, fontweight='bold')
+    ax_team_estimate.set_title(f"{team_display_name} — Team Total Estimate (weeks)", fontsize=10, fontweight='bold')
     ax_team_estimate.set_ylabel('Weeks', fontsize=9)
     ax_team_estimate.grid(True, alpha=0.3)
 
@@ -526,14 +578,14 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         max_ind_issues = max(max_ind_issues, user_df['issue_count'].max())
         max_ind_estimate = max(max_ind_estimate, user_df['total_estimate_weeks'].max())
 
-    ax_ind_issues.set_title(f"{team_name} — All Developers - Cumulative Issues", fontsize=10, fontweight='bold')
+    ax_ind_issues.set_title(f"{team_display_name} — All Developers - Cumulative Issues", fontsize=10, fontweight='bold')
     ax_ind_issues.set_ylabel('Issues', fontsize=9)
     ax_ind_issues.set_ylim(0, max_ind_issues * 1.05)
     ax_ind_issues.legend(loc='best', fontsize=8)
     ax_ind_issues.grid(True, alpha=0.3)
     ax_ind_issues.yaxis.set_major_locator(MaxNLocator(integer=True))
 
-    ax_ind_estimate.set_title(f"{team_name} — All Developers - Cumulative Estimate", fontsize=10, fontweight='bold')
+    ax_ind_estimate.set_title(f"{team_display_name} — All Developers - Cumulative Estimate", fontsize=10, fontweight='bold')
     ax_ind_estimate.set_ylabel('Estimate (weeks)', fontsize=9)
     ax_ind_estimate.set_ylim(0, max_ind_estimate * 1.05)
     ax_ind_estimate.legend(loc='best', fontsize=8)
@@ -550,17 +602,32 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     # Calculate max values across all developers for consistent y-axis scaling
     max_dev_issues = 0
     max_dev_estimate = 0
+    max_gh_prs_commits = 0
+    max_gh_reviews_comments = 0
+
     for user in developers:
         user_df = team_df[team_df['user'] == user].sort_values('week_start')
         max_dev_issues = max(max_dev_issues, user_df['issue_count'].max())
         max_dev_estimate = max(max_dev_estimate, user_df['total_estimate_weeks'].max())
 
+        if github_enabled:
+            user_gh_df = team_github_df[team_github_df['user'] == user]
+            if not user_gh_df.empty:
+                max_gh_prs_commits = max(max_gh_prs_commits, user_gh_df['prs_opened'].max(), user_gh_df['commits'].max())
+                max_gh_reviews_comments = max(max_gh_reviews_comments, user_gh_df['reviews_given'].max(), user_gh_df['comments_received'].max())
+
     # Plot individual developer breakdowns (rows 2+)
     dev_start_row = 2
     for idx, user in enumerate(developers):
-        row = dev_start_row + idx
-        ax_issues = fig.add_subplot(gs[row, 0])
-        ax_estimate = fig.add_subplot(gs[row, 1])
+        if github_enabled:
+            jira_row = dev_start_row + (idx * 2)
+            gh_row = jira_row + 1
+        else:
+            jira_row = dev_start_row + idx
+
+        # Jira rows (issues and estimate)
+        ax_issues = fig.add_subplot(gs[jira_row, 0])
+        ax_estimate = fig.add_subplot(gs[jira_row, 1])
 
         user_df = team_df[team_df['user'] == user].sort_values('week_start')
         display_name = user_df['display_name'].iloc[0]
@@ -590,8 +657,50 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=8)
             ax.tick_params(axis='y', labelsize=8)
 
+        # GitHub rows (if available)
+        if github_enabled:
+            ax_gh_left = fig.add_subplot(gs[gh_row, 0])
+            ax_gh_right = fig.add_subplot(gs[gh_row, 1])
+
+            user_gh_df = team_github_df[team_github_df['user'] == user].sort_values('week_start')
+
+            if not user_gh_df.empty:
+                user_gh_df['week_start'] = pd.to_datetime(user_gh_df['week_start'])
+                # Left: PRs + commits
+                ax_gh_left.bar(user_gh_df['week_start'] - pd.Timedelta(days=1.5), user_gh_df['prs_opened'], width=1.5, label='PRs', alpha=0.8, color='#C1121F')
+                ax_gh_left.bar(user_gh_df['week_start'] + pd.Timedelta(days=0), user_gh_df['commits'], width=1.5, label='Commits', alpha=0.8, color='#E94B3C')
+                ax_gh_left.set_title(f"{title_prefix} — PRs & Commits", fontsize=8, fontweight='bold', style='italic')
+                ax_gh_left.set_ylabel('Count', fontsize=7)
+                ax_gh_left.set_ylim(0, max(max_gh_prs_commits * 1.1, 1))
+                ax_gh_left.legend(loc='upper left', fontsize=7)
+                ax_gh_left.grid(True, alpha=0.2, axis='y')
+                ax_gh_left.yaxis.set_major_locator(MaxNLocator(integer=True))
+
+                # Right: reviews + comments
+                ax_gh_right.bar(user_gh_df['week_start'] - pd.Timedelta(days=1.5), user_gh_df['reviews_given'], width=1.5, label='Reviews', alpha=0.8, color='#457B9D')
+                ax_gh_right.bar(user_gh_df['week_start'] + pd.Timedelta(days=0), user_gh_df['comments_received'], width=1.5, label='Comments', alpha=0.8, color='#A8DADC')
+                ax_gh_right.set_title(f"{title_prefix} — Reviews & Comments", fontsize=8, fontweight='bold', style='italic')
+                ax_gh_right.set_ylabel('Count', fontsize=7)
+                ax_gh_right.set_ylim(0, max(max_gh_reviews_comments * 1.1, 1))
+                ax_gh_right.legend(loc='upper left', fontsize=7)
+                ax_gh_right.grid(True, alpha=0.2, axis='y')
+                ax_gh_right.yaxis.set_major_locator(MaxNLocator(integer=True))
+            else:
+                ax_gh_left.text(0.5, 0.5, 'No GitHub data', ha='center', va='center', transform=ax_gh_left.transAxes, fontsize=8, color='gray')
+                ax_gh_right.text(0.5, 0.5, 'No GitHub data', ha='center', va='center', transform=ax_gh_right.transAxes, fontsize=8, color='gray')
+                ax_gh_left.set_title(f"{title_prefix} — GitHub", fontsize=8, fontweight='bold', style='italic')
+                ax_gh_right.set_title(f"{title_prefix} — GitHub", fontsize=8, fontweight='bold', style='italic')
+
+            # Format GitHub x-axes
+            for ax in [ax_gh_left, ax_gh_right]:
+                ax.set_xlim(start_date, end_date + pd.Timedelta(days=2))
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+                ax.xaxis.set_major_locator(mdates.MonthLocator())
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right', fontsize=7)
+                ax.tick_params(axis='y', labelsize=7)
+
     weeks = (end_date.date() - start_date.date()).days // 7 + 1
-    fig.suptitle(f"{team_name.capitalize()} — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
+    fig.suptitle(f"{team_display_name} — {start_date.date()} to {end_date.date()} ({weeks} weeks)",
                  fontsize=20, fontweight='bold')
 
     overall_file = f"{report_prefix}_{team_name}_overall.png"
@@ -723,6 +832,11 @@ def main():
     # Load day_size from config (default: 6 hours)
     day_size = config.get('day_size', 6)
 
+    # Get GitHub config (optional)
+    github_org = args.githubOrg or config.get('github_org')
+    github_token = config.get('github_token')
+    github_username_transform = config.get('github_username_transform')
+
     # Jira client
     try:
         jira_client = jira.JIRA(
@@ -790,11 +904,18 @@ def main():
                 continue
 
             jql = build_jql_for_user(member['username'], date_clause, upper_date_clause)
-            user_queries.append((member['username'], member['display_name'], job_title, actual_team_name, jql))
+            github_username = derive_github_username(member['username'], github_username_transform) if github_org else ""
+            user_queries.append((member['username'], member['display_name'], job_title, team_name, jql, github_username))
 
     if not user_queries:
         print(f"{Fore.RED}No users to query.{Style.RESET_ALL}")
         sys.exit(1)
+
+    # Print GitHub username mapping if GitHub is enabled (Phase 1 verification)
+    if github_org:
+        print(f"\n{Fore.CYAN}GitHub Username Mapping (org: {github_org}){Style.RESET_ALL}")
+        for username, display_name, job_title, team_name, jql, github_username in user_queries:
+            print(f"  {username} ({display_name}) → {github_username}")
 
     # Query in parallel
     print(f"\n{Fore.CYAN}Querying Jira for {len(user_queries)} user(s) ({args.parallel} workers)...{Style.RESET_ALL}")
@@ -804,8 +925,8 @@ def main():
 
     with ThreadPoolExecutor(max_workers=args.parallel) as executor:
         futures = {
-            executor.submit(query_user_issues, jira_client, username, display_name, job_title, team_name, jql): (username, display_name, team_name)
-            for username, display_name, job_title, team_name, jql in user_queries
+            executor.submit(query_user_issues, jira_client, username, display_name, job_title, team_name, jql): (username, display_name, team_name, github_username)
+            for username, display_name, job_title, team_name, jql, github_username in user_queries
         }
 
         for future in as_completed(futures):
@@ -829,13 +950,59 @@ def main():
 
     agg_df = aggregate_to_weekly(df, day_size=day_size)
 
+    # Fetch GitHub metrics (Phase 2c)
+    github_df = pd.DataFrame()
+    if github_token and github_org:
+        print(f"\n{Fore.CYAN}Fetching GitHub metrics...{Style.RESET_ALL}")
+        try:
+            session = get_github_session(github_token)
+            github_rows = []
+
+            with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+                futures = {
+                    executor.submit(
+                        get_github_metrics_for_user, session,
+                        github_username, github_org, start_date, end_date
+                    ): (username, display_name, team_name)
+                    for username, display_name, job_title, team_name, jql, github_username in user_queries
+                    if github_username  # skip users with no GitHub username
+                }
+
+                completed_gh = 0
+                for future in as_completed(futures):
+                    completed_gh += 1
+                    username, display_name, team_name = futures[future]
+                    try:
+                        metrics = future.result()
+                        for row in metrics:
+                            row['user'] = username
+                            row['team'] = team_name
+                            github_rows.append(row)
+                    except Exception as e:
+                        print(f"{Fore.YELLOW}Warning: Error fetching GitHub metrics for {username}: {e}{Style.RESET_ALL}")
+
+            if github_rows:
+                github_df = pd.DataFrame(github_rows)
+                print(f"{Fore.GREEN}✓ Fetched GitHub metrics for {len(set(github_rows[i]['user'] for i in range(len(github_rows))))} user(s){Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}No GitHub activity found for the given time period.{Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"{Fore.YELLOW}Warning: GitHub fetch failed: {e}{Style.RESET_ALL}")
+            print(f"{Fore.YELLOW}Continuing with Jira-only metrics.{Style.RESET_ALL}")
+            github_df = pd.DataFrame()
+
     # Print summary
     print_summary(agg_df, raw_issues)
+
+    # Print GitHub summary if available
+    if not github_df.empty:
+        print_github_summary(github_df)
 
     # Export CSV
     if args.output:
         print(f"\n{Fore.CYAN}Exporting CSV...{Style.RESET_ALL}")
-        export_csv(raw_issues, agg_df, args.output, day_size=day_size)
+        export_csv(raw_issues, agg_df, args.output, day_size=day_size, github_df=github_df)
 
     # Generate charts with cumulative data
     if args.filePrefix:
@@ -845,7 +1012,7 @@ def main():
         for team_name in unique_teams:
             team_df = cum_df[cum_df['team'] == team_name]
             # generate_team_chart(team_name, team_df, args.filePrefix, start_date, end_date)
-            generate_team_overall_report(team_name, team_df, args.filePrefix, start_date, end_date)
+            generate_team_overall_report(team_name, team_df, args.filePrefix, start_date, end_date, github_df=github_df)
         # Only generate overlay if multiple teams
         if len(unique_teams) > 1:
             generate_overlay_chart(cum_df, args.filePrefix, start_date, end_date)

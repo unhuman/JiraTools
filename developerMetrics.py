@@ -881,8 +881,8 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     # Team totals section (row 0)
     ax_team_issues = fig.add_subplot(gs[0, 0])
     ax_team_estimate = fig.add_subplot(gs[0, 1])
-    ax_team_drag = fig.add_subplot(gs[0, 2])
-    ax_team_tickets = fig.add_subplot(gs[0, 3])
+    ax_team_tickets = fig.add_subplot(gs[0, 2])
+    ax_team_drag = fig.add_subplot(gs[0, 3])
 
     ax_team_issues.plot(team_total['week_start'], team_total['issue_count'], marker='o', color='#2E86AB', linewidth=2, markersize=5)
     ax_team_issues.fill_between(team_total['week_start'], team_total['issue_count'], alpha=0.2, color='#2E86AB')
@@ -937,8 +937,8 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     # Combined individuals section (row 1)
     ax_ind_issues = fig.add_subplot(gs[1, 0])
     ax_ind_estimate = fig.add_subplot(gs[1, 1])
-    ax_ind_drag = fig.add_subplot(gs[1, 2])
-    ax_ind_tickets = fig.add_subplot(gs[1, 3])
+    ax_ind_tickets = fig.add_subplot(gs[1, 2])
+    ax_ind_drag = fig.add_subplot(gs[1, 3])
 
     max_ind_issues = 0
     max_ind_estimate = 0
@@ -1041,11 +1041,11 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         else:
             jira_row = dev_start_row + idx
 
-        # Jira rows (issues, estimate, drag, and tickets)
+        # Jira rows (issues, estimate, tickets, and drag)
         ax_issues = fig.add_subplot(gs[jira_row, 0])
         ax_estimate = fig.add_subplot(gs[jira_row, 1])
-        ax_drag = fig.add_subplot(gs[jira_row, 2])
-        ax_tickets = fig.add_subplot(gs[jira_row, 3])
+        ax_tickets = fig.add_subplot(gs[jira_row, 2])
+        ax_drag = fig.add_subplot(gs[jira_row, 3])
 
         user_df = team_df[team_df['user'] == user].sort_values('week_start')
         display_name = user_df['display_name'].iloc[0]

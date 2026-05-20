@@ -47,6 +47,9 @@ PLOT_COLORS = [
     '#e6194b', '#3cb44b', '#ffe119', '#0082c8', '#f58231',  # crimson, kelly green, yellow, bright blue, orange
 ]
 
+# Sprint Drag custom field
+SPRINT_DRAG_IMPACTED_TIME_FIELD = 'customfield_12106'  # Impacted Time (Hrs)
+
 
 def parse_arguments():
     """Parse command-line arguments."""
@@ -183,6 +186,30 @@ def build_jql_for_user(username, date_clause, upper_date_clause=None):
     return jql
 
 
+def build_jql_drag_for_user(username, date_clause, upper_date_clause=None):
+    """Build JQL query for a user's Sprint Drag issues.
+
+    Args:
+        username: Jira reporter username
+        date_clause: Lower date filter clause (e.g., ">= startOfYear()" or ">= 2026-01-01")
+        upper_date_clause: Optional upper date filter clause
+
+    Returns:
+        JQL query string
+    """
+    created_filter = f'created {date_clause}'
+    if upper_date_clause:
+        created_filter += f' AND created {upper_date_clause}'
+
+    jql = (
+        f'reporter = "{username}" '
+        'AND issuetype = "Sprint Drag" '
+        f'AND {created_filter} '
+        'ORDER BY created DESC'
+    )
+    return jql
+
+
 def query_user_issues(jira_client, username, display_name, job_title, team_name, jql):
     """Query issues for a single user.
 
@@ -239,6 +266,56 @@ def query_user_issues(jira_client, username, display_name, job_title, team_name,
             })
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Error querying issues for {username}: {e}{Style.RESET_ALL}")
+
+    return issues
+
+
+def query_user_drag_issues(jira_client, username, display_name, job_title, team_name, jql):
+    """Query Sprint Drag issues for a single user.
+
+    Args:
+        jira_client: Jira client
+        username: Jira reporter username
+        display_name: Display name for reporting
+        job_title: Job title for reporting
+        team_name: Team name for grouping
+        jql: JQL query string
+
+    Returns:
+        List of drag issue dicts
+    """
+    issues = []
+    try:
+        fields = ['summary', 'created', SPRINT_DRAG_IMPACTED_TIME_FIELD]
+        results = search_issues(jira_client, jql, max_results=False, fields=fields)
+
+        for issue in results:
+            created_str = getattr(issue.fields, 'created', None)
+            created_date = None
+            if created_str:
+                try:
+                    created_date = datetime.strptime(created_str[:10], "%Y-%m-%d").date()
+                except (ValueError, AttributeError, TypeError):
+                    pass
+
+            if not created_date:
+                continue
+
+            impacted_hours = getattr(issue.fields, SPRINT_DRAG_IMPACTED_TIME_FIELD, None) or 0
+            impacted_hours = float(impacted_hours) if impacted_hours else 0.0
+
+            issues.append({
+                'team': team_name,
+                'user': username,
+                'display_name': display_name,
+                'job_title': job_title,
+                'issue_key': issue.key,
+                'summary': getattr(issue.fields, 'summary', ''),
+                'created_date': created_date,
+                'impacted_hours': impacted_hours,
+            })
+    except Exception as e:
+        print(f"{Fore.YELLOW}Warning: Error querying drag issues for {username}: {e}{Style.RESET_ALL}")
 
     return issues
 
@@ -300,7 +377,55 @@ def make_cumulative(agg_df):
     return cum_df
 
 
-def export_csv(raw_issues, agg_df, output_prefix, day_size=6, github_df=None):
+def aggregate_drag_to_weekly(drag_issues_list):
+    """Aggregate Sprint Drag issues to weekly buckets by created date.
+
+    Args:
+        drag_issues_list: List of drag issue dicts with created_date and impacted_hours
+
+    Returns:
+        Aggregated DataFrame with team, user, display_name, week_start, drag_hours
+    """
+    if not drag_issues_list:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(drag_issues_list)
+    df['created_date'] = pd.to_datetime(df['created_date'])
+    df['week_start'] = df['created_date'] - pd.to_timedelta(df['created_date'].dt.weekday, unit='D')
+
+    agg = df.groupby(['team', 'user', 'display_name', 'week_start']).agg(
+        drag_issue_count=('issue_key', 'count'),
+        drag_hours=('impacted_hours', 'sum'),
+    ).reset_index()
+
+    agg['drag_hours'] = agg['drag_hours'].round(2)
+    return agg.sort_values(['team', 'user', 'week_start'])
+
+
+def make_drag_cumulative(drag_agg_df):
+    """Convert weekly aggregated drag data to cumulative values.
+
+    Args:
+        drag_agg_df: Aggregated drag DataFrame with weekly data
+
+    Returns:
+        DataFrame with cumulative drag_hours
+    """
+    if drag_agg_df.empty:
+        return pd.DataFrame()
+
+    cum_df = drag_agg_df.copy()
+
+    for team in cum_df['team'].unique():
+        team_mask = cum_df['team'] == team
+        for user in cum_df.loc[team_mask, 'user'].unique():
+            user_mask = team_mask & (cum_df['user'] == user)
+            cum_df.loc[user_mask, 'drag_hours'] = cum_df.loc[user_mask, 'drag_hours'].cumsum()
+
+    return cum_df
+
+
+def export_csv(raw_issues, agg_df, output_prefix, day_size=6, github_df=None, drag_agg_df=None):
     """Export raw and aggregated data to CSV files.
 
     Args:
@@ -336,10 +461,26 @@ def export_csv(raw_issues, agg_df, output_prefix, day_size=6, github_df=None):
 
     print(f"{Fore.GREEN}Raw results exported to {raw_file}{Style.RESET_ALL}")
 
-    # Aggregated CSV (Phase 3: join GitHub data if available)
+    # Aggregated CSV (Phase 3: join GitHub and Drag data if available)
     if not agg_df.empty:
         agg_df_sorted = agg_df.sort_values(['team', 'user', 'week_start'])
         agg_df_sorted['Week Start'] = agg_df_sorted['week_start'].dt.strftime('%Y-%m-%d')
+
+        # Join Drag data if available
+        if drag_agg_df is not None and not drag_agg_df.empty:
+            drag_agg_df_join = drag_agg_df.copy()
+            drag_agg_df_join['week_start'] = pd.to_datetime(drag_agg_df_join['week_start']).dt.date
+            agg_df_sorted['week_start'] = agg_df_sorted['week_start'].dt.date
+
+            agg_df_sorted = agg_df_sorted.merge(
+                drag_agg_df_join[['team', 'user', 'week_start', 'drag_hours']],
+                on=['team', 'user', 'week_start'],
+                how='left'
+            )
+            agg_df_sorted['drag_hours'] = agg_df_sorted['drag_hours'].fillna(0)
+            agg_df_sorted['week_start'] = pd.to_datetime(agg_df_sorted['week_start'])
+        else:
+            agg_df_sorted['week_start'] = pd.to_datetime(agg_df_sorted['week_start'])
 
         # Join GitHub data if available
         if github_df is not None and not github_df.empty:
@@ -358,17 +499,23 @@ def export_csv(raw_issues, agg_df, output_prefix, day_size=6, github_df=None):
                 if col in agg_df_sorted_with_gh.columns:
                     agg_df_sorted_with_gh[col] = agg_df_sorted_with_gh[col].fillna(0).astype(int)
 
-            agg_df_sorted_with_gh[['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_weeks',
-                                    'prs_opened', 'commits', 'reviews_given', 'comments_received']].to_csv(
-                agg_file, index=False,
-                header=['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (weeks)',
-                        'GitHub PRs Opened', 'GitHub Commits', 'GitHub Reviews Given', 'GitHub Comments Received']
-            )
+            cols_to_export = ['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_weeks']
+            headers = ['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (weeks)']
+            if 'drag_hours' in agg_df_sorted_with_gh.columns:
+                cols_to_export.extend(['drag_hours'])
+                headers.extend(['Drag Hours'])
+            cols_to_export.extend(['prs_opened', 'commits', 'reviews_given', 'comments_received'])
+            headers.extend(['GitHub PRs Opened', 'GitHub Commits', 'GitHub Reviews Given', 'GitHub Comments Received'])
+
+            agg_df_sorted_with_gh[cols_to_export].to_csv(agg_file, index=False, header=headers)
         else:
-            agg_df_sorted[['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_weeks']].to_csv(
-                agg_file, index=False,
-                header=['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (weeks)']
-            )
+            cols_to_export = ['team', 'user', 'display_name', 'Week Start', 'issue_count', 'total_estimate_weeks']
+            headers = ['Team', 'User', 'Display Name', 'Week Start', 'Issue Count', 'Total Estimate (weeks)']
+            if 'drag_hours' in agg_df_sorted.columns:
+                cols_to_export.extend(['drag_hours'])
+                headers.extend(['Drag Hours'])
+
+            agg_df_sorted[cols_to_export].to_csv(agg_file, index=False, header=headers)
 
         print(f"{Fore.GREEN}Aggregated results exported to {agg_file}{Style.RESET_ALL}")
 
@@ -486,7 +633,7 @@ def generate_team_chart(team_name, team_df, report_prefix, start_date, end_date)
     print(f"{Fore.GREEN}Generated {total_file}{Style.RESET_ALL}")
 
 
-def generate_team_overall_report(team_name, team_df, report_prefix, start_date, end_date, github_df=None):
+def generate_team_overall_report(team_name, team_df, report_prefix, start_date, end_date, github_df=None, drag_df=None):
     """Generate a comprehensive single-page team report with team totals, individuals combined, then individual breakdowns.
 
     Args:
@@ -496,6 +643,7 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         start_date: Report start date
         end_date: Report end date
         github_df: Optional GitHub metrics DataFrame with columns: user, team, week_start, prs_opened, commits, reviews_given, comments_received
+        drag_df: Optional Sprint Drag DataFrame filtered to this team with columns: user, display_name, week_start, drag_hours
     """
     if team_df.empty:
         return
@@ -512,7 +660,10 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     # Check if GitHub data is available for this team
     github_enabled = github_df is not None and not github_df.empty and (github_df['team'] == team_name).any()
 
-    # Grid layout: 1 row per section (team, combined, + one or two per dev)
+    # Check if drag data is available for this team
+    drag_enabled = drag_df is not None and not drag_df.empty and (drag_df['team'] == team_name).any()
+
+    # Grid layout: 1 row per section (team, combined, + one or two per dev), now 3 columns (Issues | Estimate | Drag)
     # When GitHub enabled: Jira row + GitHub row per dev
     if github_enabled:
         # Filter GitHub data to this team for reference
@@ -525,10 +676,10 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         height_ratios = [2.5, 2.5] + [1.5] * num_developers
         fig_height = 3.5 + 3.5 + (num_developers * 2.5) + 1.5
 
-    fig = plt.figure(figsize=(14, fig_height), constrained_layout=True)
+    fig = plt.figure(figsize=(18, fig_height), constrained_layout=True)
 
-    # Create grid with height ratios (constrained_layout manages spacing automatically)
-    gs = fig.add_gridspec(total_rows, 2, height_ratios=height_ratios, wspace=0.3)
+    # Create grid with 3 columns (Issues | Estimate | Drag)
+    gs = fig.add_gridspec(total_rows, 3, height_ratios=height_ratios, wspace=0.3)
 
     # Calculate team total
     incremental = []
@@ -547,9 +698,29 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     team_total['issue_count'] = team_total['issue_count_inc'].cumsum()
     team_total['total_estimate_weeks'] = team_total['total_estimate_weeks_inc'].cumsum()
 
+    # Pre-calculate max drag values if drag is enabled
+    max_team_drag = 0
+    max_dev_drag_pre = 0
+    if drag_enabled:
+        team_drag_total_pre = drag_df.groupby('week_start').agg({'drag_hours': 'sum'}).reset_index().sort_values('week_start')
+        team_drag_total_pre['drag_hours'] = pd.to_numeric(team_drag_total_pre['drag_hours'], errors='coerce').fillna(0)
+        team_drag_total_pre['drag_hours_cumsum'] = team_drag_total_pre['drag_hours'].cumsum()
+        max_team_drag = team_drag_total_pre['drag_hours_cumsum'].max()
+
+        for user in developers:
+            user_drag_df_pre = drag_df[drag_df['user'] == user].sort_values('week_start').copy()
+            if not user_drag_df_pre.empty:
+                user_drag_df_pre['drag_hours'] = pd.to_numeric(user_drag_df_pre['drag_hours'], errors='coerce').fillna(0)
+                user_drag_cumsum_pre = user_drag_df_pre['drag_hours'].cumsum()
+                max_dev_drag_pre = max(max_dev_drag_pre, user_drag_cumsum_pre.max())
+
+    # Initialize max_dev_drag early so it's available in combined individuals section
+    max_dev_drag = max_dev_drag_pre
+
     # Team totals section (row 0)
     ax_team_issues = fig.add_subplot(gs[0, 0])
     ax_team_estimate = fig.add_subplot(gs[0, 1])
+    ax_team_drag = fig.add_subplot(gs[0, 2])
 
     ax_team_issues.plot(team_total['week_start'], team_total['issue_count'], marker='o', color='#2E86AB', linewidth=2, markersize=5)
     ax_team_issues.fill_between(team_total['week_start'], team_total['issue_count'], alpha=0.2, color='#2E86AB')
@@ -564,8 +735,22 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     ax_team_estimate.set_ylabel('Weeks', fontsize=9)
     ax_team_estimate.grid(True, alpha=0.3)
 
+    # Team drag total (if available)
+    if drag_enabled:
+        team_drag_total = team_drag_total_pre.copy()
+        team_drag_total['week_start'] = pd.to_datetime(team_drag_total['week_start'])
+        ax_team_drag.plot(team_drag_total['week_start'], team_drag_total['drag_hours_cumsum'], marker='o', color='#E63946', linewidth=2, markersize=5)
+        ax_team_drag.fill_between(team_drag_total['week_start'], team_drag_total['drag_hours_cumsum'], alpha=0.2, color='#E63946')
+        ax_team_drag.set_title(f"{team_display_name} — Team Total Drag (hrs)", fontsize=10, fontweight='bold')
+        ax_team_drag.set_ylabel('Hours', fontsize=9)
+        ax_team_drag.set_ylim(0, max_team_drag * 1.05)
+        ax_team_drag.grid(True, alpha=0.3)
+    else:
+        ax_team_drag.text(0.5, 0.5, 'No drag data', ha='center', va='center', transform=ax_team_drag.transAxes, fontsize=9, color='gray')
+        ax_team_drag.set_title(f"{team_display_name} — Team Total Drag (hrs)", fontsize=10, fontweight='bold')
+
     # Format team total x-axes
-    for ax in [ax_team_issues, ax_team_estimate]:
+    for ax in [ax_team_issues, ax_team_estimate, ax_team_drag]:
         ax.set_xlim(start_date, end_date + pd.Timedelta(days=2))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         ax.xaxis.set_major_locator(mdates.MonthLocator())
@@ -575,6 +760,7 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     # Combined individuals section (row 1)
     ax_ind_issues = fig.add_subplot(gs[1, 0])
     ax_ind_estimate = fig.add_subplot(gs[1, 1])
+    ax_ind_drag = fig.add_subplot(gs[1, 2])
 
     max_ind_issues = 0
     max_ind_estimate = 0
@@ -589,6 +775,16 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         max_ind_issues = max(max_ind_issues, user_df['issue_count'].max())
         max_ind_estimate = max(max_ind_estimate, user_df['total_estimate_weeks'].max())
 
+        # Add drag data for combined view
+        if drag_enabled:
+            user_drag_df = drag_df[drag_df['user'] == user].sort_values('week_start')
+            if not user_drag_df.empty:
+                user_drag_df = user_drag_df.copy()
+                user_drag_df['week_start'] = pd.to_datetime(user_drag_df['week_start'])
+                user_drag_df['drag_hours'] = pd.to_numeric(user_drag_df['drag_hours'], errors='coerce').fillna(0)
+                user_drag_df['drag_cumsum'] = user_drag_df['drag_hours'].cumsum()
+                ax_ind_drag.plot(user_drag_df['week_start'], user_drag_df['drag_cumsum'], marker=marker, color=color, label=display_name, linewidth=1.5)
+
     ax_ind_issues.set_title(f"{team_display_name} — All Developers - Cumulative Issues", fontsize=10, fontweight='bold')
     ax_ind_issues.set_ylabel('Issues', fontsize=9)
     ax_ind_issues.set_ylim(0, max_ind_issues * 1.05)
@@ -602,8 +798,18 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     ax_ind_estimate.legend(loc='best', fontsize=8)
     ax_ind_estimate.grid(True, alpha=0.3)
 
+    if drag_enabled:
+        ax_ind_drag.set_title(f"{team_display_name} — All Developers - Cumulative Drag", fontsize=10, fontweight='bold')
+        ax_ind_drag.set_ylabel('Hours', fontsize=9)
+        ax_ind_drag.set_ylim(0, max_dev_drag * 1.05)
+        ax_ind_drag.legend(loc='best', fontsize=8)
+        ax_ind_drag.grid(True, alpha=0.3)
+    else:
+        ax_ind_drag.text(0.5, 0.5, 'No drag data', ha='center', va='center', transform=ax_ind_drag.transAxes, fontsize=9, color='gray')
+        ax_ind_drag.set_title(f"{team_display_name} — All Developers - Cumulative Drag", fontsize=10, fontweight='bold')
+
     # Format combined individuals x-axes
-    for ax in [ax_ind_issues, ax_ind_estimate]:
+    for ax in [ax_ind_issues, ax_ind_estimate, ax_ind_drag]:
         ax.set_xlim(start_date, end_date + pd.Timedelta(days=2))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
         ax.xaxis.set_major_locator(mdates.MonthLocator())
@@ -636,9 +842,10 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         else:
             jira_row = dev_start_row + idx
 
-        # Jira rows (issues and estimate)
+        # Jira rows (issues, estimate, and drag)
         ax_issues = fig.add_subplot(gs[jira_row, 0])
         ax_estimate = fig.add_subplot(gs[jira_row, 1])
+        ax_drag = fig.add_subplot(gs[jira_row, 2])
 
         user_df = team_df[team_df['user'] == user].sort_values('week_start')
         display_name = user_df['display_name'].iloc[0]
@@ -660,8 +867,28 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
         ax_estimate.set_ylim(0, max_dev_estimate * 1.05)
         ax_estimate.grid(True, alpha=0.2)
 
+        # Drag data for individual developer
+        if drag_enabled:
+            user_drag_df = drag_df[drag_df['user'] == user].sort_values('week_start')
+            if not user_drag_df.empty:
+                user_drag_df = user_drag_df.copy()
+                user_drag_df['week_start'] = pd.to_datetime(user_drag_df['week_start'])
+                user_drag_df['drag_cumsum'] = user_drag_df['drag_hours'].cumsum()
+                ax_drag.plot(user_drag_df['week_start'], user_drag_df['drag_cumsum'], marker='o', color='#E63946', linewidth=1.5, markersize=4)
+                ax_drag.fill_between(user_drag_df['week_start'], user_drag_df['drag_cumsum'], alpha=0.15, color='#E63946')
+                ax_drag.set_title(f"{title_prefix} — Drag (hrs)", fontsize=9, fontweight='bold')
+                ax_drag.set_ylabel('Hours', fontsize=8)
+                ax_drag.set_ylim(0, max_dev_drag * 1.05)
+                ax_drag.grid(True, alpha=0.2)
+            else:
+                ax_drag.text(0.5, 0.5, 'No drag', ha='center', va='center', transform=ax_drag.transAxes, fontsize=8, color='gray')
+                ax_drag.set_title(f"{title_prefix} — Drag (hrs)", fontsize=9, fontweight='bold')
+        else:
+            ax_drag.text(0.5, 0.5, 'No drag data', ha='center', va='center', transform=ax_drag.transAxes, fontsize=8, color='gray')
+            ax_drag.set_title(f"{title_prefix} — Drag (hrs)", fontsize=9, fontweight='bold')
+
         # Format x-axis for individual subplots — fix range so MonthLocator is consistent
-        for ax in [ax_issues, ax_estimate]:
+        for ax in [ax_issues, ax_estimate, ax_drag]:
             ax.set_xlim(start_date, end_date + pd.Timedelta(days=2))
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
             ax.xaxis.set_major_locator(mdates.MonthLocator())
@@ -1005,6 +1232,44 @@ def main():
             print(f"{Fore.YELLOW}Continuing with Jira-only metrics.{Style.RESET_ALL}")
             github_df = pd.DataFrame()
 
+    # Query Sprint Drag in parallel (same users, new JQL)
+    print(f"\n{Fore.CYAN}Querying Jira for Sprint Drag...{Style.RESET_ALL}")
+    drag_jql_queries = [
+        (username, display_name, job_title, team_name,
+         build_jql_drag_for_user(username, date_clause, upper_date_clause))
+        for username, display_name, job_title, team_name, jql, github_username in user_queries
+    ]
+
+    raw_drag_issues = []
+    completed_drag = 0
+
+    with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+        futures = {
+            executor.submit(query_user_drag_issues, jira_client, *q): q
+            for q in drag_jql_queries
+        }
+
+        for future in as_completed(futures):
+            completed_drag += 1
+            print(f"\r{Fore.CYAN}  Progress: {completed_drag}/{len(drag_jql_queries)} users queried for drag{Style.RESET_ALL}    ", end="", flush=True)
+            try:
+                issues = future.result()
+                raw_drag_issues.extend(issues)
+            except Exception as e:
+                print(f"\n{Fore.YELLOW}Warning: Error querying drag issues: {e}{Style.RESET_ALL}")
+
+    print()  # newline after progress
+
+    # Aggregate drag data
+    drag_agg_df = pd.DataFrame()
+    if raw_drag_issues:
+        drag_agg_df = aggregate_drag_to_weekly(raw_drag_issues)
+        cum_drag_df = make_drag_cumulative(drag_agg_df)
+        print(f"{Fore.GREEN}✓ Found {len(raw_drag_issues)} Sprint Drag issue(s){Style.RESET_ALL}")
+    else:
+        print(f"{Fore.YELLOW}No Sprint Drag issues found for the given time period.{Style.RESET_ALL}")
+        cum_drag_df = pd.DataFrame()
+
     # Print summary
     print_summary(agg_df, raw_issues)
 
@@ -1015,7 +1280,7 @@ def main():
     # Export CSV
     if args.output:
         print(f"\n{Fore.CYAN}Exporting CSV...{Style.RESET_ALL}")
-        export_csv(raw_issues, agg_df, args.output, day_size=day_size, github_df=github_df)
+        export_csv(raw_issues, agg_df, args.output, day_size=day_size, github_df=github_df, drag_agg_df=drag_agg_df)
 
     # Generate charts with cumulative data
     if args.filePrefix:
@@ -1024,8 +1289,9 @@ def main():
         unique_teams = cum_df['team'].unique()
         for team_name in unique_teams:
             team_df = cum_df[cum_df['team'] == team_name]
+            team_drag_df = cum_drag_df[cum_drag_df['team'] == team_name] if not cum_drag_df.empty else pd.DataFrame()
             # generate_team_chart(team_name, team_df, args.filePrefix, start_date, end_date)
-            generate_team_overall_report(team_name, team_df, args.filePrefix, start_date, end_date, github_df=github_df)
+            generate_team_overall_report(team_name, team_df, args.filePrefix, start_date, end_date, github_df=github_df, drag_df=team_drag_df)
         # Only generate overlay if multiple teams
         if len(unique_teams) > 1:
             generate_overlay_chart(cum_df, args.filePrefix, start_date, end_date)

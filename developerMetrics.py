@@ -38,6 +38,15 @@ from libraries.githubTools import (
     print_github_summary
 )
 
+# Distinct marker shapes and colors for multi-series plots to prevent overlap
+PLOT_MARKERS = ['o', 's', '^', 'D', 'v', 'P', '*', 'X', 'h', '+']
+PLOT_COLORS = [
+    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',  # blue, orange, green, red, purple
+    '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',  # brown, pink, gray, olive, cyan
+    '#1a9850', '#d73027', '#fee090', '#4575b4', '#f46d43',  # forest green, dark red, light yellow, steel blue, coral
+    '#e6194b', '#3cb44b', '#ffe119', '#0082c8', '#f58231',  # crimson, kelly green, yellow, bright blue, orange
+]
+
 
 def parse_arguments():
     """Parse command-line arguments."""
@@ -570,11 +579,13 @@ def generate_team_overall_report(team_name, team_df, report_prefix, start_date, 
     max_ind_issues = 0
     max_ind_estimate = 0
 
-    for user in developers:
+    for idx, user in enumerate(developers):
         user_df = team_df[team_df['user'] == user].sort_values('week_start')
         display_name = user_df['display_name'].iloc[0]
-        ax_ind_issues.plot(user_df['week_start'], user_df['issue_count'], marker='o', label=display_name, linewidth=1.5)
-        ax_ind_estimate.plot(user_df['week_start'], user_df['total_estimate_weeks'], marker='o', label=display_name, linewidth=1.5)
+        marker = PLOT_MARKERS[idx % len(PLOT_MARKERS)]
+        color = PLOT_COLORS[idx % len(PLOT_COLORS)]
+        ax_ind_issues.plot(user_df['week_start'], user_df['issue_count'], marker=marker, color=color, label=display_name, linewidth=1.5)
+        ax_ind_estimate.plot(user_df['week_start'], user_df['total_estimate_weeks'], marker=marker, color=color, label=display_name, linewidth=1.5)
         max_ind_issues = max(max_ind_issues, user_df['issue_count'].max())
         max_ind_estimate = max(max_ind_estimate, user_df['total_estimate_weeks'].max())
 
@@ -726,7 +737,7 @@ def generate_overlay_chart(agg_df, report_prefix, start_date, end_date):
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
 
-    for team in agg_df['team'].unique():
+    for idx, team in enumerate(agg_df['team'].unique()):
         team_df = agg_df[agg_df['team'] == team].copy()
         # Forward-fill missing weeks per user so cumulative values carry forward
         all_weeks = pd.date_range(team_df['week_start'].min(), team_df['week_start'].max(), freq='W-MON')
@@ -749,8 +760,10 @@ def generate_overlay_chart(agg_df, report_prefix, start_date, end_date):
             'total_estimate_weeks': 'sum'
         }).reset_index().sort_values('week_start')
 
-        ax1.plot(team_total['week_start'], team_total['issue_count'], marker='o', label=team, linewidth=2)
-        ax2.plot(team_total['week_start'], team_total['total_estimate_weeks'], marker='o', label=team, linewidth=2)
+        marker = PLOT_MARKERS[idx % len(PLOT_MARKERS)]
+        color = PLOT_COLORS[idx % len(PLOT_COLORS)]
+        ax1.plot(team_total['week_start'], team_total['issue_count'], marker=marker, color=color, label=team, linewidth=2)
+        ax2.plot(team_total['week_start'], team_total['total_estimate_weeks'], marker=marker, color=color, label=team, linewidth=2)
 
     ax1.set_title("All Teams — Cumulative Issue Count", fontsize=12, fontweight='bold')
     ax1.set_ylabel('Issue Count', fontsize=10)

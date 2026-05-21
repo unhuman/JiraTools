@@ -1485,11 +1485,9 @@ def main():
     drag_agg_df = pd.DataFrame()
     if raw_drag_issues:
         drag_agg_df = aggregate_drag_to_weekly(raw_drag_issues)
-        cum_drag_df = make_drag_cumulative(drag_agg_df)
         print(f"{Fore.GREEN}✓ Found {len(raw_drag_issues)} Sprint Drag issue(s){Style.RESET_ALL}")
     else:
         print(f"{Fore.YELLOW}No Sprint Drag issues found for the given time period.{Style.RESET_ALL}")
-        cum_drag_df = pd.DataFrame()
 
     # Query Tickets Created in parallel (same users, new JQL)
     print(f"\n{Fore.CYAN}Querying Jira for Tickets Created...{Style.RESET_ALL}")
@@ -1548,7 +1546,7 @@ def main():
         unique_teams = cum_df['team'].unique()
         for team_name in unique_teams:
             team_df = cum_df[cum_df['team'] == team_name]
-            team_drag_df = cum_drag_df[cum_drag_df['team'] == team_name] if not cum_drag_df.empty else pd.DataFrame()
+            team_drag_df = drag_agg_df[drag_agg_df['team'] == team_name] if not drag_agg_df.empty else pd.DataFrame()
             team_tickets_df = cum_tickets_df[cum_tickets_df['team'] == team_name] if not cum_tickets_df.empty else pd.DataFrame()
             # generate_team_chart(team_name, team_df, args.filePrefix, start_date, end_date)
             generate_team_overall_report(team_name, team_df, args.filePrefix, start_date, end_date, github_df=github_df, drag_df=team_drag_df, tickets_df=team_tickets_df)

@@ -58,6 +58,7 @@ Your Excel config file must include a **`CustomFields`** sheet that maps logical
 
 When instructing Claude Code to create tickets, the following field mapping rules apply:
 
+- **Description** — Always use the **complete, full-length text** from the CSV `Description` column. Do not abbreviate, summarize, or truncate descriptions. The description field often contains detailed improvement opportunities, metrics, and structured data that teams rely on. If descriptions appear long, pass them in full—Jira accepts large description blocks. Truncation causes loss of critical information and requires post-creation updates.
 - **Epic Link** — use the `epicKey` additional field (e.g. `{"epicKey": "PROJ-123"}`), **not** the raw `customfield_XXXXX` value. Using the custom field directly may result in a permissions error even when you have access to the epic.
 - **Sprint Team** — pass as `{"customfield_XXXXX": {"value": "TeamName"}}` (requires the `value` wrapper per the `Data Wrapper` column).
 - **Sprint** — pass as `{"customfield_XXXXX": <sprint_id>}` where the sprint ID is the numeric value from the Teams sheet.

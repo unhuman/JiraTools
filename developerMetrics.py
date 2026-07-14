@@ -1547,7 +1547,7 @@ def main():
         for team_name in unique_teams:
             team_df = cum_df[cum_df['team'] == team_name]
             team_drag_df = drag_agg_df[drag_agg_df['team'] == team_name] if not drag_agg_df.empty else pd.DataFrame()
-            team_tickets_df = cum_tickets_df[cum_tickets_df['team'] == team_name] if not cum_tickets_df.empty else pd.DataFrame()
+            team_tickets_df = tickets_agg_df[tickets_agg_df['team'] == team_name] if not tickets_agg_df.empty else pd.DataFrame()
             # generate_team_chart(team_name, team_df, args.filePrefix, start_date, end_date)
             generate_team_overall_report(team_name, team_df, args.filePrefix, start_date, end_date, github_df=github_df, drag_df=team_drag_df, tickets_df=team_tickets_df)
         # Only generate overlay if multiple teams

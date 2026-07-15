@@ -76,12 +76,17 @@ Use `createTicketsFromCsv.py` to create Jira tickets from the per-team CSV files
 
 ### Alternative: Manual Creation via Claude Code
 
-If you prefer to use Claude Code with the Jira MCP, follow these field mapping rules:
+**⚠️ WARNING:** Only use this approach if you are very careful with the implementation. There is a high risk of mistakes when Claude Code reads and creates tickets row-by-row. Previous errors include reusing the Summary (or other field values) from the first CSV row for all subsequent rows, resulting in duplicate or incorrect ticket titles that require manual correction.
 
+If you still choose to use Claude Code with the Jira MCP:
+
+- **Summary** — Pass the exact `Summary` value from **each individual CSV row**. Do **not** reuse the summary from the first row for subsequent rows. This is the most common mistake.
 - **Description** — Always use the **complete, full-length text** from the CSV `Description` column. Do not abbreviate, summarize, or truncate descriptions. The description field often contains detailed improvement opportunities, metrics, and structured data that teams rely on. Truncation causes loss of critical information and requires post-creation updates.
+- **All other fields** — For each CSV row, pass all field values (Priority, Assignee, Epic Link, Sprint, Component, Sprint Team) fresh from that row, not from a previous row or a cached variable.
 - **Epic Link** — use the `epicKey` additional field (e.g. `{"epicKey": "PROJ-123"}`), **not** the raw `customfield_XXXXX` value.
-- **Summary** — Pass the exact `Summary` value from each CSV row; do **not** reuse the summary from the first row for subsequent rows.
 - Use `jira_create_issue` for each ticket individually — `jira_batch_create_issues` does not support `additional_fields`, so Priority, Epic Link, Sprint, and Sprint Team would be silently dropped.
+
+**Recommendation:** Use `createTicketsFromCsv.py` instead. It is deterministic and eliminates the risk of field-value reuse.
 
 ---
 

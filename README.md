@@ -55,20 +55,20 @@ Use `createTicketsFromCsv.py` to create Jira tickets from the per-team CSV files
    python standardTicketCreator.py teams.xlsx --csv output.csv
    ```
 
-2. (Optional) Verify what would be created without calling Jira:
-   ```bash
-   python createTicketsFromCsv.py q3-2026-Queueless.csv teams.xlsx --dry-run
-   ```
-
-3. Create the tickets:
+2. Preview what would be created (default behavior, no Jira calls):
    ```bash
    python createTicketsFromCsv.py q3-2026-Queueless.csv teams.xlsx
+   ```
+
+3. Once satisfied, create the tickets with `-c` or `--create`:
+   ```bash
+   python createTicketsFromCsv.py q3-2026-Queueless.csv teams.xlsx -c
    ```
 
    Repeat for each team's CSV file, or wrap in a loop:
    ```bash
    for csv in q3-2026-*.csv; do
-     python createTicketsFromCsv.py "$csv" teams.xlsx
+     python createTicketsFromCsv.py "$csv" teams.xlsx -c
    done
    ```
 

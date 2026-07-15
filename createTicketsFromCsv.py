@@ -7,8 +7,8 @@ via the Python Jira client, avoiding the error-prone manual loop required
 when using Claude Code with the Jira MCP.
 
 Usage:
-    python createTicketsFromCsv.py q3-2026-Queueless.csv teams.xlsx      # preview (dry-run)
-    python createTicketsFromCsv.py q3-2026-Queueless.csv teams.xlsx -c   # create tickets
+    python createTicketsFromCsv.py q3-2026-Queueless.csv teams.xlsx              # preview (dry-run)
+    python createTicketsFromCsv.py q3-2026-Queueless.csv teams.xlsx --create-tickets  # create tickets
 """
 
 import argparse
@@ -34,7 +34,7 @@ def parse_arguments():
         help="Excel config file (teams.xlsx) needed to resolve custom field IDs"
     )
     parser.add_argument(
-        "-c", "--create",
+        "--create-tickets",
         action="store_true",
         help="Actually create tickets in Jira (default: dry-run only, prints what would be created)"
     )
@@ -149,9 +149,9 @@ def main():
         custom_fields_mapping = {}
 
     # Create tickets (default: dry-run only)
-    dry_run = not args.create
+    dry_run = not args.create_tickets
     if dry_run:
-        print(f"{Fore.YELLOW}[DRY RUN MODE] No tickets will be created. Pass -c/--create to actually create.{Style.RESET_ALL}\n")
+        print(f"{Fore.YELLOW}[DRY RUN MODE] No tickets will be created.{Style.RESET_ALL}\n")
     print(f"{Fore.CYAN}Reading tickets from {args.csv_file}...{Style.RESET_ALL}\n")
     created_tickets = create_tickets_from_csv(
         args.csv_file,
@@ -161,11 +161,15 @@ def main():
         dry_run=dry_run
     )
 
-    if not dry_run and created_tickets:
+    if created_tickets:
         print(f"\n{Fore.GREEN}Summary:{Style.RESET_ALL}")
         print(f"  Created {len(created_tickets)} ticket(s)")
         for key in created_tickets:
             print(f"    {key}")
+
+    if dry_run:
+        print(f"\n{Fore.CYAN}To actually create these tickets, run:{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}  python createTicketsFromCsv.py {args.csv_file} {args.excel_file} --create-tickets{Style.RESET_ALL}")
 
 
 if __name__ == "__main__":

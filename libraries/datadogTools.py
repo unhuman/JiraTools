@@ -481,10 +481,10 @@ def sanitize_filename(filename: str) -> str:
         filename: Original filename
 
     Returns:
-        Sanitized filename (e.g., '.hidden' becomes 'dot_hidden')
+        Sanitized filename (e.g., '.Net' becomes 'dotNet')
     """
     if filename.startswith('.'):
-        return f"dot_{filename[1:]}"
+        return f"dot{filename[1:]}"
     return filename
 
 

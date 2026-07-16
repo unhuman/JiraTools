@@ -884,6 +884,7 @@ def main():
     parser.add_argument('datadog_host', help='Datadog host URL (e.g., https://app.datadoghq.com)')
     
     # Authentication options (all optional - will read from ~/.datadog.cfg if not provided)
+    parser.add_argument('--pat', help='Datadog Personal Access Token (recommended; if not provided, reads from ~/.datadog.cfg)')
     parser.add_argument('--api-key', help='Datadog API key (if not provided, reads from ~/.datadog.cfg)')
     parser.add_argument('--app-key', help='Datadog application key (if not provided, reads from ~/.datadog.cfg)')
     parser.add_argument('--cookies', help='Cookie string (semicolon separated) for authentication')

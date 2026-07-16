@@ -49,17 +49,22 @@ Alternatively, pass them on the command line with `--api-key` and `--app-key`.
 
 #### Option A: Use an Existing Key
 
-If your organization already has a Datadog API key and app key (e.g., shared in your team's docs or 1Password):
+If your organization already has a Datadog API key and app key:
 
-1. Obtain the key values from your team or documentation
-2. Create `~/.datadog.cfg` with the existing keys:
+1. **Log in to Datadog** at https://app.datadoghq.com (or your organization's Datadog site)
+2. Go to **Organization Settings** → **API Keys** (or **Application Keys**)
+3. Look for an existing key that's already created (you'll see the key name and creation date)
+4. **Note**: The full key value is only visible at creation time. If you can't see the value:
+   - Copy the **key name** and ask your team if they have the value stored (docs, 1Password, etc.)
+   - Or proceed to Option B to create a new key
+5. Once you have the values, create `~/.datadog.cfg`:
    ```json
    {
      "api-key": "YOUR_EXISTING_API_KEY",
      "app-key": "YOUR_EXISTING_APP_KEY"
    }
    ```
-3. Verify it has the required scopes (see below) — if you get a 403 error, ask your Datadog admin or try Option B
+6. Verify it has the required scopes (see below) — if you get a 403 error, try Option B
 
 #### Option B: Create a New Key
 

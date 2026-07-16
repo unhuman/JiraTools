@@ -34,56 +34,75 @@ python serviceConsumerAnalysis.py allTeamApplications.json pr50 https://cvent.da
 - **`--ignoreCacheExpiry`**: Use cached API responses even if older than 24 hours (skips API calls for faster re-runs)
 - **`--excludeSpecifiedTeamRequests`**: Remove self-traffic — when analyzing services owned by a team, exclude calls from services owned by *the same team* (reduces noise in reports)
 
-**Credentials**: By default, the script reads your Datadog API key and app key from `~/.datadog.cfg`. If you don't have it yet, create that file with:
+**Credentials**: By default, the script reads your Datadog Personal Access Token (PAT) from `~/.datadog.cfg`. Create that file with:
 
 ```json
 {
-  "api-key": "YOUR_API_KEY",
-  "app-key": "YOUR_APP_KEY"
+  "pat": "YOUR_PERSONAL_ACCESS_TOKEN"
 }
 ```
 
-Alternatively, pass them on the command line with `--api-key` and `--app-key`.
+Alternatively, pass it on the command line with `--pat TOKEN`.
 
-### Getting Your Datadog API and App Keys
+### Getting Your Datadog Credentials
 
-#### Option A: Use an Existing Key
+#### Option A: Use a Personal Access Token (PAT) — Recommended
 
-If your organization already has a Datadog API key and app key:
+PATs are the modern, recommended way to authenticate. They're simpler than API key + app key pairs.
+
+**Finding an Existing PAT:**
 
 1. **Log in to Datadog** at https://app.datadoghq.com (or your organization's Datadog site)
 2. Click on your **email address in the bottom left corner** of the sidebar
 3. Select **Organization Settings** from the dropdown menu
-4. Go to **API Keys** (or **Application Keys**)
-5. Look for an existing key that's already created (you'll see the key name and creation date)
-6. **Note**: The full key value is only visible at creation time. If you can't see the value:
-   - Copy the **key name** and ask your team if they have the value stored (docs, 1Password, etc.)
-   - Or proceed to Option B to create a new key
-7. Once you have the values, create `~/.datadog.cfg`:
+4. Go to **Access Tokens**
+5. Look for an existing token (you'll see the token name and creation date)
+6. **Note**: The full token value is only visible at creation time. If you can't see the value, ask your team if they have it stored (docs, 1Password, etc.)
+
+**Creating a New PAT:**
+
+1. Follow steps 1-4 above
+2. Click **New Access Token**
+3. Name it (e.g., "JiraTools - Service Consumer Analysis")
+4. Under **Select Scopes**, find and select:
+   - **`apm_read`** — Read and query APM and Trace Analytics
+5. Click **Create Token**
+6. Copy the token value and create `~/.datadog.cfg`:
    ```json
    {
-     "api-key": "YOUR_EXISTING_API_KEY",
-     "app-key": "YOUR_EXISTING_APP_KEY"
+     "pat": "YOUR_PERSONAL_ACCESS_TOKEN"
    }
    ```
-8. Verify it has the required scopes (see below) — if you get a 403 error, try Option B
 
-#### Option B: Create a New Key
+#### Option B: Use API Key + Application Key (Legacy)
 
-If no key exists or the existing key lacks required scopes:
+If your organization doesn't support PATs yet, use the traditional API key + app key approach.
+
+**Finding Existing Keys:**
 
 1. **Log in to Datadog** at https://app.datadoghq.com (or your organization's Datadog site)
 2. Click on your **email address in the bottom left corner** of the sidebar
 3. Select **Organization Settings** from the dropdown menu
-4. Go to **API Keys** (or **Application Keys** for the app key)
-5. Click **Create API Key** (or **Create Application Key**)
-6. Name it (e.g., "JiraTools - Service Consumer Analysis")
-7. **Scopes required** (critical for avoiding 403 errors):
-   - `apm_read_data` — Read APM trace data
-   - `spans_aggregate_data_read` — Read span analytics
-8. Copy the key and paste it into `~/.datadog.cfg`
+4. Go to **API Keys** (or **Application Keys** separately)
+5. Look for existing keys (you'll see the key name and creation date)
+6. **Note**: The full key value is only visible at creation time. If you can't see the value, ask your team if they have it stored (docs, 1Password, etc.)
 
-**Troubleshooting 403 Forbidden**: If you get a 403 error, your API key likely doesn't have the required scopes. Go to your **email address (bottom left corner)** → **Organization Settings** → **API Keys**, and verify the key has both `apm_read_data` and `spans_aggregate_data_read` scopes. If not, regenerate it with those scopes or ask your Datadog admin to grant them.
+**Creating New Keys:**
+
+1. Follow steps 1-4 above
+2. Click **Create API Key** (and separately **Create Application Key**)
+3. Name them (e.g., "JiraTools - Service Consumer Analysis")
+4. For the API Key: Create and copy it (no scopes needed)
+5. For the Application Key: Create and copy it (no scopes needed)
+6. Create `~/.datadog.cfg`:
+   ```json
+   {
+     "api-key": "YOUR_API_KEY",
+     "app-key": "YOUR_APP_KEY"
+   }
+   ```
+
+**Troubleshooting 403 Forbidden**: If you get a 403 error, your PAT or API key may lack the `apm_read` scope (for PAT) or the required permissions (for API keys). Verify the scope/permissions in Datadog Organization Settings and regenerate if needed.
 
 ## Prerequisites
 
@@ -91,8 +110,9 @@ If no key exists or the existing key lacks required scopes:
    - `requests` - HTTP client for Datadog API
    - `colorama` - Colored terminal output
 
-2. **Datadog Access**:
-   - API Key and Application Key, OR
+2. **Datadog Access** (choose one):
+   - Personal Access Token (recommended), OR
+   - API Key and Application Key (legacy), OR
    - Valid authentication cookies
 
 3. **Input Data**:
@@ -117,15 +137,20 @@ python serviceConsumerAnalysis.py <input_file> <environment> <datadog_host> [aut
 
 Choose one of the following:
 
-#### Option 1: API Keys (Recommended)
+#### Option 1: Personal Access Token (Recommended)
+```bash
+--pat <YOUR_PERSONAL_ACCESS_TOKEN>
+```
+
+#### Option 2: API Keys (Legacy)
 ```bash
 --api-key <YOUR_API_KEY> --app-key <YOUR_APP_KEY>
 ```
 
-#### Option 2: Configuration File (Most Convenient)
-If you omit `--api-key` and `--app-key`, credentials are automatically read from `~/.datadog.cfg`
+#### Option 3: Configuration File (Most Convenient)
+If you omit auth options above, credentials are automatically read from `~/.datadog.cfg` (in priority order: PAT → API keys → cookies)
 
-#### Option 3: Cookie Authentication
+#### Option 4: Cookie Authentication
 ```bash
 --cookies "<cookie_string>"
 ```
@@ -197,19 +222,25 @@ Cookies should be semicolon-separated (e.g., `"_dd_did=...; datadog-theme=light"
 
 ### Examples
 
-**1. Basic usage with config file authentication:**
+**1. Basic usage with config file authentication (recommended):**
 ```bash
 python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com
 ```
 
-**2. Analyze specific teams with 2-week time window:**
+**2. Using PAT on the command line:**
+```bash
+python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com \
+  --pat YOUR_PERSONAL_ACCESS_TOKEN
+```
+
+**3. Analyze specific teams with 2-week time window:**
 ```bash
 python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com \
   --time-period 2w \
   --teams "team1,team2,team3"
 ```
 
-**3. Single application analysis with explicit API keys:**
+**4. Single application analysis with explicit API keys (legacy):**
 ```bash
 python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com \
   --api-key YOUR_API_KEY \
@@ -217,7 +248,7 @@ python serviceConsumerAnalysis.py allTeamApplications.json production https://co
   -a "service-a"
 ```
 
-**4. Using cookie authentication:**
+**5. Using cookie authentication:**
 ```bash
 python serviceConsumerAnalysis.py allTeamApplications.json production https://company.datadoghq.com \
   --cookies "_dd_did=...; datadog-theme=light; dogweb=..."

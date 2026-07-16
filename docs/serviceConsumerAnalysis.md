@@ -52,34 +52,38 @@ Alternatively, pass them on the command line with `--api-key` and `--app-key`.
 If your organization already has a Datadog API key and app key:
 
 1. **Log in to Datadog** at https://app.datadoghq.com (or your organization's Datadog site)
-2. Go to **Organization Settings** → **API Keys** (or **Application Keys**)
-3. Look for an existing key that's already created (you'll see the key name and creation date)
-4. **Note**: The full key value is only visible at creation time. If you can't see the value:
+2. Click on your **email address in the bottom left corner** of the sidebar
+3. Select **Organization Settings** from the dropdown menu
+4. Go to **API Keys** (or **Application Keys**)
+5. Look for an existing key that's already created (you'll see the key name and creation date)
+6. **Note**: The full key value is only visible at creation time. If you can't see the value:
    - Copy the **key name** and ask your team if they have the value stored (docs, 1Password, etc.)
    - Or proceed to Option B to create a new key
-5. Once you have the values, create `~/.datadog.cfg`:
+7. Once you have the values, create `~/.datadog.cfg`:
    ```json
    {
      "api-key": "YOUR_EXISTING_API_KEY",
      "app-key": "YOUR_EXISTING_APP_KEY"
    }
    ```
-6. Verify it has the required scopes (see below) — if you get a 403 error, try Option B
+8. Verify it has the required scopes (see below) — if you get a 403 error, try Option B
 
 #### Option B: Create a New Key
 
 If no key exists or the existing key lacks required scopes:
 
 1. **Log in to Datadog** at https://app.datadoghq.com (or your organization's Datadog site)
-2. Go to **Organization Settings** → **API Keys** (or **Application Keys** for the app key)
-3. Click **Create API Key** (or **Create Application Key**)
-4. Name it (e.g., "JiraTools - Service Consumer Analysis")
-5. **Scopes required** (critical for avoiding 403 errors):
+2. Click on your **email address in the bottom left corner** of the sidebar
+3. Select **Organization Settings** from the dropdown menu
+4. Go to **API Keys** (or **Application Keys** for the app key)
+5. Click **Create API Key** (or **Create Application Key**)
+6. Name it (e.g., "JiraTools - Service Consumer Analysis")
+7. **Scopes required** (critical for avoiding 403 errors):
    - `apm_read_data` — Read APM trace data
    - `spans_aggregate_data_read` — Read span analytics
-6. Copy the key and paste it into `~/.datadog.cfg`
+8. Copy the key and paste it into `~/.datadog.cfg`
 
-**Troubleshooting 403 Forbidden**: If you get a 403 error, your API key likely doesn't have the required scopes. Check Organization Settings → API Keys and verify the key has both `apm_read_data` and `spans_aggregate_data_read` scopes. If not, regenerate it with those scopes or ask your Datadog admin to grant them.
+**Troubleshooting 403 Forbidden**: If you get a 403 error, your API key likely doesn't have the required scopes. Go to your **email address (bottom left corner)** → **Organization Settings** → **API Keys**, and verify the key has both `apm_read_data` and `spans_aggregate_data_read` scopes. If not, regenerate it with those scopes or ask your Datadog admin to grant them.
 
 ## Prerequisites
 

@@ -47,6 +47,24 @@ Alternatively, pass them on the command line with `--api-key` and `--app-key`.
 
 ### Getting Your Datadog API and App Keys
 
+#### Option A: Use an Existing Key
+
+If your organization already has a Datadog API key and app key (e.g., shared in your team's docs or 1Password):
+
+1. Obtain the key values from your team or documentation
+2. Create `~/.datadog.cfg` with the existing keys:
+   ```json
+   {
+     "api-key": "YOUR_EXISTING_API_KEY",
+     "app-key": "YOUR_EXISTING_APP_KEY"
+   }
+   ```
+3. Verify it has the required scopes (see below) — if you get a 403 error, ask your Datadog admin or try Option B
+
+#### Option B: Create a New Key
+
+If no key exists or the existing key lacks required scopes:
+
 1. **Log in to Datadog** at https://app.datadoghq.com (or your organization's Datadog site)
 2. Go to **Organization Settings** → **API Keys** (or **Application Keys** for the app key)
 3. Click **Create API Key** (or **Create Application Key**)
@@ -56,7 +74,7 @@ Alternatively, pass them on the command line with `--api-key` and `--app-key`.
    - `spans_aggregate_data_read` — Read span analytics
 6. Copy the key and paste it into `~/.datadog.cfg`
 
-**Note**: If you get a 403 Forbidden error when running the script, your API key likely doesn't have these scopes. Regenerate the key with the correct permissions above.
+**Troubleshooting 403 Forbidden**: If you get a 403 error, your API key likely doesn't have the required scopes. Check Organization Settings → API Keys and verify the key has both `apm_read_data` and `spans_aggregate_data_read` scopes. If not, regenerate it with those scopes or ask your Datadog admin to grant them.
 
 ## Prerequisites
 

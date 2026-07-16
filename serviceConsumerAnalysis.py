@@ -912,26 +912,35 @@ def main():
     config_exclude_team_requests = False
     config_exclude_products = []
     map_products = {}
-    if not args.cookies and not args.api_key and not args.app_key:
-        config_api_key, config_app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests, config_exclude_products, map_products = load_datadog_config()
-        if config_api_key and config_app_key:
+    auth_from_cli = args.pat or args.cookies or args.api_key or args.app_key
+
+    if not auth_from_cli:
+        config_pat, config_api_key, config_app_key, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests, config_exclude_products, map_products = load_datadog_config()
+        if config_pat:
+            args.pat = config_pat
+        elif config_api_key and config_app_key:
             args.api_key = config_api_key
             args.app_key = config_app_key
         else:
-            parser.error('Authentication required: provide --cookies OR (--api-key and --app-key) OR create ~/.datadog.cfg with credentials')
+            parser.error('Authentication required: provide --pat OR (--api-key and --app-key) OR --cookies OR create ~/.datadog.cfg with credentials')
     else:
         # Still load application aliases, skip list, service mappings, desired-end-categorizations, remap-categorizations, teams, excludeSpecifiedTeamRequests, exclude-products, and map-products even if auth is provided via CLI
-        _, _, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests, config_exclude_products, map_products = load_datadog_config()
-    
+        _, _, _, application_aliases, skip_applications, service_mappings, desired_end_categorizations, remap_categorizations, config_teams, config_exclude_team_requests, config_exclude_products, map_products = load_datadog_config()
+
     # Validate authentication combinations
     if args.api_key and not args.app_key:
         parser.error('--app-key is required when using --api-key')
     if args.app_key and not args.api_key:
         parser.error('--api-key is required when using --app-key')
-    
+
     # Final check: ensure we have some form of authentication
-    if not args.cookies and not (args.api_key and args.app_key):
-        parser.error('Authentication required: provide --cookies OR (--api-key and --app-key) OR create ~/.datadog.cfg with credentials')
+    if not (args.pat or args.cookies or (args.api_key and args.app_key)):
+        parser.error('Authentication required: provide --pat OR (--api-key and --app-key) OR --cookies OR create ~/.datadog.cfg with credentials')
+
+    # Auto-save credentials passed on command line to config file (for future convenience)
+    # Only save if credentials explicitly provided on CLI (not loaded from config or cookies)
+    if auth_from_cli and not args.cookies and (args.pat or (args.api_key and args.app_key)):
+        save_credentials_to_config(pat=args.pat, api_key=args.api_key, app_key=args.app_key)
     
     # Validate preserve-rate-limit
     if args.preserve_rate_limit < 0:

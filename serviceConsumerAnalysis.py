@@ -943,13 +943,13 @@ class ServiceConsumerAnalyzer:
             with open(csv_filename, 'w', newline='') as f:
                 writer = csv.writer(f)
 
-                # Write header row (domains)
-                writer.writerow(['Consumer'] + domains)
+                # Write header row (consumers)
+                writer.writerow(['Domain'] + all_consumers)
 
-                # Write data rows (consumers with percentages)
-                for consumer in all_consumers:
-                    row = [consumer]
-                    for domain in domains:
+                # Write data rows (domains with percentages)
+                for domain in domains:
+                    row = [domain]
+                    for consumer in all_consumers:
                         percentage = domain_percentages.get(domain, {}).get(consumer, 0)
                         row.append(f"{percentage:.2f}" if percentage > 0 else "0.00")
                     writer.writerow(row)

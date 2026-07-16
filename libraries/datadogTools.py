@@ -471,6 +471,23 @@ def save_credentials_to_config(pat: Optional[str] = None, api_key: Optional[str]
         return False
 
 
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize a filename to avoid hidden files and other issues.
+
+    Converts leading dots to 'dot' prefix to prevent hidden files in Unix-like systems.
+
+    Args:
+        filename: Original filename
+
+    Returns:
+        Sanitized filename (e.g., '.hidden' becomes 'dot_hidden')
+    """
+    if filename.startswith('.'):
+        return f"dot_{filename[1:]}"
+    return filename
+
+
 def add_datadog_auth_args(parser: argparse.ArgumentParser):
     """
     Add mutually exclusive Datadog authentication arguments to an argparse parser.

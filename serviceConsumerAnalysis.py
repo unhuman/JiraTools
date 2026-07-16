@@ -159,7 +159,7 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from colorama import init, Fore, Style
 
-from libraries.datadogTools import DatadogClient, load_datadog_config, save_credentials_to_config, add_datadog_auth_args
+from libraries.datadogTools import DatadogClient, load_datadog_config, save_credentials_to_config, add_datadog_auth_args, sanitize_filename
 
 # Initialize colorama for cross-platform colored output
 init(autoreset=True)
@@ -804,7 +804,8 @@ class ServiceConsumerAnalyzer:
         
         # Now generate individual domain reports with sorted data
         for domain in domain_consumers.keys():
-            report_filename = f"{output_dir}/{domain.replace(' ', '_')}_consumer_report.json"
+            domain_safe = sanitize_filename(domain.replace(' ', '_'))
+            report_filename = f"{output_dir}/{domain_safe}_consumer_report.json"
             
             total_calls = sum(domain_consumers.get(domain, {}).values())
             
@@ -834,7 +835,7 @@ class ServiceConsumerAnalyzer:
                 summary_filename = f"{output_dir}/multiple_teams_report.json"
             else:
                 # Single team - use team name (sanitize for filename)
-                team_label = team_names.replace(' ', '_')
+                team_label = sanitize_filename(team_names.replace(' ', '_'))
                 summary_filename = f"{output_dir}/{team_label}_analysis_summary.json"
         elif application_names:
             # Check if multiple applications
@@ -842,7 +843,7 @@ class ServiceConsumerAnalyzer:
                 summary_filename = f"{output_dir}/multiple_applications_analysis_summary.json"
             else:
                 # Single application - use app name (sanitize for filename)
-                app_label = application_names.replace(' ', '_')
+                app_label = sanitize_filename(application_names.replace(' ', '_'))
                 summary_filename = f"{output_dir}/{app_label}_analysis_summary.json"
         else:
             # Default filename

@@ -1097,6 +1097,7 @@ def main():
     
     datadog_client = DatadogClient(
         host=args.datadog_host,
+        pat=args.pat,
         api_key=args.api_key,
         app_key=args.app_key,
         cookies=args.cookies,

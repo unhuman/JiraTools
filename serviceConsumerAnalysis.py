@@ -159,7 +159,7 @@ from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 from colorama import init, Fore, Style
 
-from libraries.datadogTools import DatadogClient, load_datadog_config, save_credentials_to_config
+from libraries.datadogTools import DatadogClient, load_datadog_config, save_credentials_to_config, add_datadog_auth_args
 
 # Initialize colorama for cross-platform colored output
 init(autoreset=True)
@@ -884,13 +884,7 @@ def main():
     parser.add_argument('datadog_host', help='Datadog host URL (e.g., https://app.datadoghq.com)')
     
     # Authentication options (mutually exclusive - will read from ~/.datadog.cfg if not provided)
-    auth_group = parser.add_mutually_exclusive_group()
-    auth_group.add_argument('--pat', help='Datadog Personal Access Token (recommended; if not provided, reads from ~/.datadog.cfg)')
-    auth_group.add_argument('--api-key', help='Datadog API key (use with --app-key; if not provided, reads from ~/.datadog.cfg)')
-    auth_group.add_argument('--cookies', help='Cookie string (semicolon separated) for authentication')
-
-    # App key is paired with API key, not in the exclusive group
-    parser.add_argument('--app-key', help='Datadog application key (required if --api-key is provided)')
+    add_datadog_auth_args(parser)
     
     # Optional arguments
     parser.add_argument('-t', '--teams', help='Optional: Process only these teams, comma-separated (e.g., "Oktagon,Identity")')

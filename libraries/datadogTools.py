@@ -6,6 +6,7 @@ import time
 import hashlib
 import glob
 import requests
+import argparse
 from typing import Dict, List, Optional
 from collections import defaultdict
 from colorama import Fore, Style
@@ -468,3 +469,25 @@ def save_credentials_to_config(pat: Optional[str] = None, api_key: Optional[str]
     except Exception as e:
         print(f"{Fore.YELLOW}Warning: Could not save credentials to ~/.datadog.cfg: {e}{Style.RESET_ALL}")
         return False
+
+
+def add_datadog_auth_args(parser: argparse.ArgumentParser):
+    """
+    Add mutually exclusive Datadog authentication arguments to an argparse parser.
+
+    Creates a mutually exclusive group with three authentication options:
+    - --pat: Personal Access Token (recommended)
+    - --api-key: API key (must be used with --app-key)
+    - --cookies: Cookie-based authentication
+
+    Also adds --app-key separately since it's only valid with --api-key.
+
+    Args:
+        parser: argparse.ArgumentParser instance to add arguments to
+    """
+    auth_group = parser.add_mutually_exclusive_group()
+    auth_group.add_argument('--pat', help='Datadog Personal Access Token (recommended; if not provided, reads from ~/.datadog.cfg)')
+    auth_group.add_argument('--api-key', help='Datadog API key (use with --app-key; if not provided, reads from ~/.datadog.cfg)')
+    auth_group.add_argument('--cookies', help='Cookie string (semicolon separated) for authentication')
+
+    parser.add_argument('--app-key', help='Datadog application key (required if --api-key is provided)')

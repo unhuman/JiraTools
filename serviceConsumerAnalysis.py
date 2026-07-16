@@ -960,7 +960,23 @@ def main():
         sys.exit(1)
     
     print(f"  Loaded {len(attribution_data)} teams")
-    
+
+    # Check if attribution data is fresh (within 30 days)
+    import time
+    file_mtime = os.path.getmtime(args.input_file)
+    file_age_seconds = time.time() - file_mtime
+    file_age_days = file_age_seconds / (24 * 3600)
+
+    if file_age_days > 30:
+        print(f"\n{Fore.YELLOW}⚠️  WARNING: Team attribution data is {file_age_days:.0f} days old{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}This analysis may not reflect current team/application ownership.{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}Please regenerate {args.input_file} by running:{Style.RESET_ALL}\n")
+        print(f"{Fore.CYAN}  python teamApplicationAttribution.py https://backstage.example.com{Style.RESET_ALL}\n")
+        print(f"{Fore.YELLOW}Then re-run this analysis with the updated data.{Style.RESET_ALL}\n")
+        sys.exit(1)
+    elif file_age_days > 14:
+        print(f"{Fore.YELLOW}ℹ️  Note: Team attribution data is {file_age_days:.0f} days old. Consider updating it.{Style.RESET_ALL}\n")
+
     # Keep a copy of full data for domain lookups
     full_attribution_data = attribution_data.copy()
     

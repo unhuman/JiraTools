@@ -2,8 +2,44 @@
 
 import requests
 import time
+import math
 import pandas as pd
+import threading
+import collections
 from datetime import datetime, timedelta
+
+
+class _SearchRateLimiter:
+    """Enforces GitHub Search API limit across all threads."""
+    def __init__(self, max_calls=15, period=60):
+        self._lock = threading.Lock()
+        self._calls = collections.deque()
+        self._max_calls = max_calls
+        self._period = period
+
+    def acquire(self):
+        """Block until safe to make a search request, respecting 30 req/min limit."""
+        with self._lock:
+            now = time.monotonic()
+            while self._calls and now - self._calls[0] >= self._period:
+                self._calls.popleft()
+            if len(self._calls) >= self._max_calls:
+                sleep_for = math.ceil(self._period - (now - self._calls[0])) + 5
+                self._lock.release()
+                print(f"GitHub rate limit: waiting {sleep_for}s...", end='', flush=True)
+                for remaining in range(sleep_for, 0, -1):
+                    time.sleep(1)
+                    if remaining > 1:
+                        print(f"\rGitHub rate limit: waiting {remaining}s...", end='', flush=True)
+                print()  # newline at end
+                self._lock.acquire()
+                now = time.monotonic()
+                while self._calls and now - self._calls[0] >= self._period:
+                    self._calls.popleft()
+            self._calls.append(time.monotonic())
+
+
+_search_rate_limiter = _SearchRateLimiter()
 
 
 def derive_github_username(backstage_username, transform_rules=None):
@@ -109,6 +145,7 @@ def github_search_all(session, url, params, date_field="created_at", max_results
         params_copy["page"] = page
         params_copy["per_page"] = 100
 
+        _search_rate_limiter.acquire()
         response = session.get(f"https://api.github.com{url}", params=params_copy)
 
         # Handle rate limiting
@@ -119,14 +156,18 @@ def github_search_all(session, url, params, date_field="created_at", max_results
 
             if remaining == "0" or response.status_code == 429:
                 if retry_after:
-                    sleep_seconds = int(retry_after)
+                    sleep_seconds = int(retry_after) + 5
                 elif reset:
-                    sleep_seconds = max(1, int(reset) - time.time() + 1)
+                    sleep_seconds = max(1, math.ceil(int(reset) - time.time())) + 5
                 else:
                     sleep_seconds = 60
 
-                print(f"GitHub rate limited. Sleeping {sleep_seconds} seconds...")
-                time.sleep(sleep_seconds)
+                print(f"GitHub rate limited. Waiting {sleep_seconds}s...", end='', flush=True)
+                for sec in range(sleep_seconds, 0, -1):
+                    time.sleep(1)
+                    if sec > 1:
+                        print(f"\rGitHub rate limited. Waiting {sec}s...", end='', flush=True)
+                print()  # newline at end
                 continue  # Retry the same request
 
         response.raise_for_status()
@@ -182,6 +223,7 @@ def get_github_metrics_for_user(session, github_username, github_org, start_date
 
     # Query 1: PRs opened by user
     try:
+        print(f"  [{github_username}] Fetching PRs opened...")
         query = f"type:pr author:{github_username} org:{github_org} created:{start_str}..{end_str}"
         prs = github_search_all(session, "/search/issues", {"q": query})
 
@@ -201,6 +243,7 @@ def get_github_metrics_for_user(session, github_username, github_org, start_date
 
     # Query 2: Commits by user
     try:
+        print(f"  [{github_username}] Fetching commits...")
         query = f"author:{github_username} org:{github_org} author-date:{start_str}..{end_str}"
         commits = github_search_all(session, "/search/commits", {"q": query})
 
@@ -220,6 +263,7 @@ def get_github_metrics_for_user(session, github_username, github_org, start_date
 
     # Query 3: PRs reviewed by user (excluding own)
     try:
+        print(f"  [{github_username}] Fetching PRs reviewed...")
         query = f"type:pr reviewed-by:{github_username} org:{github_org} updated:{start_str}..{end_str}"
         reviewed_prs = github_search_all(session, "/search/issues", {"q": query})
 
@@ -240,6 +284,7 @@ def get_github_metrics_for_user(session, github_username, github_org, start_date
 
     # Query 4: Comments on user's PRs
     try:
+        print(f"  [{github_username}] Fetching PR comments...")
         query = f"type:pr author:{github_username} org:{github_org} comments:>0 updated:{start_str}..{end_str}"
         user_prs = github_search_all(session, "/search/issues", {"q": query})
 

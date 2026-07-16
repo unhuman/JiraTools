@@ -12,6 +12,39 @@ The tool takes team application attribution data (from `teamApplicationAttributi
 
 **Key Feature**: Reports are organized by **domain** (one file per domain), but within each report, consumers are intelligently grouped by their **product** (with automatic fallback to domain if no product is defined).
 
+## Quick Start
+
+If you have `allTeamApplications.json` and `~/.datadog.cfg` set up, this command analyzes a 2-week window with appropriate rate-limit settings:
+
+```bash
+python serviceConsumerAnalysis.py allTeamApplications.json pr50 https://cvent.datadoghq.com \
+  --time-period 2w \
+  --preserve-rate-limit 0 \
+  --ignoreCacheExpiry \
+  --excludeSpecifiedTeamRequests
+```
+
+**What each flag does:**
+
+- **`allTeamApplications.json`**: Attribution data (produced by `teamApplicationAttribution.py`; defines which services belong to which teams and domains)
+- **`pr50`**: Datadog environment to query (e.g., `pr50`, `production`, `staging`)
+- **`https://cvent.datadoghq.com`**: Your Datadog site URL
+- **`--time-period 2w`**: Analyze the last 2 weeks of trace data (adjust to `1h`, `1d`, `1w`, etc. as needed)
+- **`--preserve-rate-limit 0`**: Use the full Datadog rate limit without holding back (speeds up large queries)
+- **`--ignoreCacheExpiry`**: Use cached API responses even if older than 24 hours (skips API calls for faster re-runs)
+- **`--excludeSpecifiedTeamRequests`**: Remove self-traffic — when analyzing services owned by a team, exclude calls from services owned by *the same team* (reduces noise in reports)
+
+**Credentials**: By default, the script reads your Datadog API key and app key from `~/.datadog.cfg`. If you don't have it yet, create that file with:
+
+```json
+{
+  "api-key": "YOUR_API_KEY",
+  "app-key": "YOUR_APP_KEY"
+}
+```
+
+Alternatively, pass them on the command line with `--api-key` and `--app-key`.
+
 ## Prerequisites
 
 1. **Python 3.x** with required packages:

@@ -45,6 +45,19 @@ python serviceConsumerAnalysis.py allTeamApplications.json pr50 https://cvent.da
 
 Alternatively, pass them on the command line with `--api-key` and `--app-key`.
 
+### Getting Your Datadog API and App Keys
+
+1. **Log in to Datadog** at https://app.datadoghq.com (or your organization's Datadog site)
+2. Go to **Organization Settings** → **API Keys** (or **Application Keys** for the app key)
+3. Click **Create API Key** (or **Create Application Key**)
+4. Name it (e.g., "JiraTools - Service Consumer Analysis")
+5. **Scopes required** (critical for avoiding 403 errors):
+   - `apm_read_data` — Read APM trace data
+   - `spans_aggregate_data_read` — Read span analytics
+6. Copy the key and paste it into `~/.datadog.cfg`
+
+**Note**: If you get a 403 Forbidden error when running the script, your API key likely doesn't have these scopes. Regenerate the key with the correct permissions above.
+
 ## Prerequisites
 
 1. **Python 3.x** with required packages:

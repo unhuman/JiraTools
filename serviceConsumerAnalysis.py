@@ -149,6 +149,7 @@ Output Reports:
 """
 
 import argparse
+import csv
 import json
 import sys
 import requests
@@ -870,6 +871,94 @@ class ServiceConsumerAnalyzer:
         
         print(f"\n{Fore.GREEN}Generated summary report: {summary_filename}{Style.RESET_ALL}")
 
+    def generate_csv(self, analysis_results: Dict, output_dir: str = '.', team_names: str = None, application_names: str = None):
+        """
+        Generate a pivot table CSV from analysis results.
+
+        Creates a cross-tabulation with domains as columns and consumer products as rows,
+        with percentages as cell values.
+
+        Args:
+            analysis_results: Results from analyze_all_teams()
+            output_dir: Directory to save CSV file
+            team_names: (Optional) Team filter string for filename
+            application_names: (Optional) Application filter string for filename
+        """
+        domain_consumers = analysis_results['domain_consumers']
+        domain_details = analysis_results['domain_details']
+
+        # Calculate percentages for each domain's consumers
+        domain_percentages = {}
+        for target_domain, consumer_products in domain_consumers.items():
+            total_calls = sum(consumer_products.values())
+            domain_percentages[target_domain] = {}
+
+            for consumer_product, count in consumer_products.items():
+                percentage = (count / total_calls * 100) if total_calls > 0 else 0
+                details = domain_details.get(target_domain, {}).get(consumer_product, [])
+
+                # Calculate total excluded count from details
+                excluded_count = sum(d.get('excluded_count', 0) for d in details)
+
+                # Check if this product should be excluded
+                is_excluded_product = consumer_product.lower() in self.exclude_products
+
+                # If excluded by product name, treat count as excluded
+                if is_excluded_product:
+                    excluded_count = count
+                    count = 0
+                    percentage = 0.0
+
+                # Only include products with non-excluded traffic
+                if count > 0:
+                    domain_percentages[target_domain][consumer_product] = round(percentage, 2)
+
+        # Collect all unique domains and consumer products
+        domains = sorted(domain_percentages.keys())
+        all_consumers = set()
+
+        for domain, consumers in domain_percentages.items():
+            all_consumers.update(consumers.keys())
+
+        all_consumers = sorted(all_consumers)
+
+        # Determine CSV filename (match JSON naming convention)
+        if team_names:
+            if ',' in team_names:
+                csv_filename = f"{output_dir}/multiple_teams_report.csv"
+            else:
+                team_label = sanitize_filename(team_names.replace(' ', '_'))
+                csv_filename = f"{output_dir}/{team_label}_analysis_summary.csv"
+        elif application_names:
+            if ',' in application_names:
+                csv_filename = f"{output_dir}/multiple_applications_analysis_summary.csv"
+            else:
+                app_label = sanitize_filename(application_names.replace(' ', '_'))
+                csv_filename = f"{output_dir}/{app_label}_analysis_summary.csv"
+        else:
+            csv_filename = f"{output_dir}/consumer_analysis_summary.csv"
+
+        # Write CSV
+        try:
+            with open(csv_filename, 'w', newline='') as f:
+                writer = csv.writer(f)
+
+                # Write header row (domains)
+                writer.writerow(['Consumer'] + domains)
+
+                # Write data rows (consumers with percentages)
+                for consumer in all_consumers:
+                    row = [consumer]
+                    for domain in domains:
+                        percentage = domain_percentages.get(domain, {}).get(consumer, 0)
+                        row.append(f"{percentage:.2f}" if percentage > 0 else "0.00")
+                    writer.writerow(row)
+
+            print(f"{Fore.GREEN}Generated CSV report: {csv_filename}{Style.RESET_ALL}")
+
+        except Exception as e:
+            print(f"{Fore.RED}Error generating CSV: {e}{Style.RESET_ALL}")
+
 
 def main():
     """Main entry point."""
@@ -1148,12 +1237,20 @@ def main():
     
     # Generate reports with custom filenames based on filters
     analyzer.generate_reports(
-        results, 
+        results,
         output_dir=args.output_dir,
         team_names=args.teams,
         application_names=args.applications
     )
-    
+
+    # Generate CSV pivot table
+    analyzer.generate_csv(
+        results,
+        output_dir=args.output_dir,
+        team_names=args.teams,
+        application_names=args.applications
+    )
+
     # Save errors to file if any 500 errors occurred
     errors_file = datadog_client.save_errors_to_file(args.output_dir)
     if errors_file:

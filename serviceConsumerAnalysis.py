@@ -94,6 +94,7 @@ Output Reports:
                {
                  "target_service": "<service being called>",
                  "calling_service": "<service making the call>",
+                 "calling_team": "<team that owns the calling service, or null if unknown>",
                  "count": <number of requests>
                }
              ]
@@ -627,12 +628,18 @@ class ServiceConsumerAnalyzer:
                     
                     # Get product (with domain fallback) for this consumer service
                     consumer_group = self._get_product_or_domain_for_service(consumer_service)
-                    
+
+                    # Get team ownership for this consumer service
+                    calling_team_info, _ = self._lookup_service_with_fallback(consumer_service)
+                    calling_team = None
+                    if calling_team_info:
+                        calling_team = calling_team_info.get('team_title') or calling_team_info.get('team_name')
+
                     # Apply product mapping if configured (case-insensitive)
                     consumer_group_lower = consumer_group.lower()
                     if consumer_group_lower in self.map_products:
                         consumer_group = self.map_products[consumer_group_lower]
-                    
+
                     # Check if this service should be excluded (from excluded team, External/Unknown, or excluded product)
                     is_excluded_team = self._is_service_from_excluded_team(consumer_service)
                     is_external_unknown = consumer_group == 'External/Unknown'
@@ -646,6 +653,7 @@ class ServiceConsumerAnalyzer:
                         domain_details[team_domain][consumer_group].append({
                             'target_service': service_name,
                             'calling_service': consumer_service,
+                            'calling_team': calling_team,
                             'excluded_count': call_count  # Preserve actual count as excluded_count
                         })
                     else:
@@ -663,6 +671,7 @@ class ServiceConsumerAnalyzer:
                         domain_details[team_domain][consumer_group].append({
                             'target_service': service_name,
                             'calling_service': consumer_service,
+                            'calling_team': calling_team,
                             'count': call_count
                         })
                 
